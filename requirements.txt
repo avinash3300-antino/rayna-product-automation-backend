@@ -10,10 +10,12 @@ alembic==1.15.2
 # Pydantic
 pydantic==2.11.1
 pydantic-settings==2.8.1
+email-validator==2.2.0
 
 # Auth
 python-jose[cryptography]==3.4.0
 passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 
 # Background tasks
 celery[redis]==5.4.0

@@ -4,6 +4,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from app.core.config import settings
+from app.core.exceptions import UnauthorizedError
 
 ALGORITHM = "HS256"
 
@@ -18,16 +19,23 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
-def create_access_token(subject: str, extra: dict | None = None) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    payload = {"sub": subject, "exp": expire}
-    if extra:
-        payload.update(extra)
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
+def create_access_token(
+    data: dict,
+    expires_delta: timedelta | None = None,
+) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    to_encode["exp"] = expire
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
     try:
-        return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("sub") is None:
+            raise UnauthorizedError()
+        return payload
     except JWTError:
-        return {}
+        raise UnauthorizedError()
