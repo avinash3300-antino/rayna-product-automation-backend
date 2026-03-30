@@ -45,6 +45,7 @@ def user_to_dict(user: AuthUser) -> dict:
         "department": user.department,
         "phone": user.phone,
         "timezone": user.timezone,
+        "profile_picture_url": user.profile_picture_url,
         "status": user.status,
     }
 

@@ -4,7 +4,7 @@ import secrets
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, UploadFile
 from sqlalchemy import func as sa_func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,7 @@ from app.schemas.users import (
     UserResponse,
     UserUpdate,
 )
-from app.services import user_service
+from app.services import cloudinary_service, user_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
@@ -42,6 +42,7 @@ def _build_user_response(user: AuthUser) -> UserResponse:
         department=user.department,
         phone=user.phone,
         timezone=user.timezone,
+        profile_picture_url=user.profile_picture_url,
         status=user.status,
         last_login_at=user.last_login_at,
         created_at=user.created_at,
@@ -133,6 +134,52 @@ async def change_password(
     )
     await db.commit()
     return {"message": "Password updated"}
+
+
+@router.post("/me/profile-picture", response_model=UserResponse)
+async def upload_profile_picture(
+    file: UploadFile,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        url = await cloudinary_service.upload_profile_picture(file, str(current_user.id))
+    except ValueError as e:
+        raise BadRequestError(str(e))
+
+    old_data = user_service.user_to_dict(current_user)
+    current_user.profile_picture_url = url
+
+    await user_service.write_audit(
+        db, current_user.id, "auth_users", current_user.id,
+        "profile_picture_updated", old_data, {"profile_picture_url": url},
+    )
+    await db.commit()
+
+    user = await user_service.get_user_by_id(db, current_user.id)
+    return _build_user_response(user)
+
+
+@router.delete("/me/profile-picture", response_model=UserResponse)
+async def delete_profile_picture(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    if not current_user.profile_picture_url:
+        raise BadRequestError("No profile picture to delete")
+
+    old_data = user_service.user_to_dict(current_user)
+    await cloudinary_service.delete_profile_picture(str(current_user.id))
+    current_user.profile_picture_url = None
+
+    await user_service.write_audit(
+        db, current_user.id, "auth_users", current_user.id,
+        "profile_picture_deleted", old_data, {"profile_picture_url": None},
+    )
+    await db.commit()
+
+    user = await user_service.get_user_by_id(db, current_user.id)
+    return _build_user_response(user)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

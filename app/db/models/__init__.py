@@ -7,6 +7,7 @@ class Base(DeclarativeBase):
 
 # Import all models so Alembic can detect them
 from app.db.models.auth import AuthUser, AuthRole, AuthUserRole  # noqa: E402, F401
+from app.db.models.sessions import AuthUserSession  # noqa: E402, F401
 from app.db.models.discovery import (  # noqa: E402, F401
     AIDiscoveryRun,
     AIDiscoveryDestinationCandidate,

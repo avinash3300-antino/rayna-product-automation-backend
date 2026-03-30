@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Apify
     APIFY_API_TOKEN: str = ""
 
+    # Cloudinary
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+
     # App
     ENVIRONMENT: str = "dev"
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"

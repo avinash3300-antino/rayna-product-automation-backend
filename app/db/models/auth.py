@@ -18,12 +18,14 @@ class AuthUser(Base):
     department: Mapped[str | None] = mapped_column(String)
     phone: Mapped[str | None] = mapped_column(String)
     timezone: Mapped[str | None] = mapped_column(String)
+    profile_picture_url: Mapped[str | None] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="active")
     last_login_at = mapped_column(DateTime(timezone=True))
     created_at = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     user_roles: Mapped[list["AuthUserRole"]] = relationship(back_populates="user", foreign_keys="AuthUserRole.user_id")
+    sessions: Mapped[list["AuthUserSession"]] = relationship(back_populates="user", foreign_keys="AuthUserSession.user_id")
 
 
 class AuthRole(Base):

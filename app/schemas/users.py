@@ -31,6 +31,7 @@ class UserResponse(BaseModel):
     department: str | None = None
     phone: str | None = None
     timezone: str | None = None
+    profile_picture_url: str | None = None
     status: str
     last_login_at: datetime | None = None
     created_at: datetime
@@ -59,6 +60,7 @@ class ProfileUpdate(BaseModel):
     department: str | None = None
     phone: str | None = None
     timezone: str | None = None
+    profile_picture_url: str | None = None
 
 
 class PasswordChange(BaseModel):
