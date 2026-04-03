@@ -1,7 +1,7 @@
 import uuid
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func, text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.models import Base
@@ -14,11 +14,14 @@ class CatalogDestination(Base):
     code: Mapped[str | None] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     country_code: Mapped[str | None] = mapped_column(String)
+    country_name: Mapped[str | None] = mapped_column(String)
+    country_flag: Mapped[str | None] = mapped_column(String)
     region_name: Mapped[str | None] = mapped_column(String)
     city_name: Mapped[str | None] = mapped_column(String)
     timezone: Mapped[str | None] = mapped_column(String)
     latitude: Mapped[float | None] = mapped_column(Numeric)
     longitude: Mapped[float | None] = mapped_column(Numeric)
+    enabled_categories = mapped_column(JSON, server_default='["hotels","attractions","transfers","restaurants"]')
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="active")
     created_at = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())

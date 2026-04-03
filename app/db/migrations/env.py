@@ -1,5 +1,10 @@
 import asyncio
+import sys
+from pathlib import Path
 from logging.config import fileConfig
+
+# Ensure the project root is on sys.path so "app" is importable
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from alembic import context
 from sqlalchemy import pool

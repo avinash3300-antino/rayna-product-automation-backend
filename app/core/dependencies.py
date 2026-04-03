@@ -3,7 +3,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, Request
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ForbiddenError, UnauthorizedError
@@ -12,7 +12,7 @@ from app.db.base import get_async_session
 from app.db.models.auth import AuthUser
 from app.services.user_service import get_user_by_id, get_user_roles
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+bearer_scheme = HTTPBearer()
 
 
 async def get_db() -> AsyncSession:
@@ -21,10 +21,11 @@ async def get_db() -> AsyncSession:
 
 
 async def get_current_user(
-    token: Annotated[str, Depends(oauth2_scheme)],
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
     db: Annotated[AsyncSession, Depends(get_db)],
     request: Request,
 ) -> AuthUser:
+    token = credentials.credentials
     payload = decode_access_token(token)
     user_id_str: str | None = payload.get("sub")
     if not user_id_str:
