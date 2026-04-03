@@ -435,6 +435,46 @@ async def delete_location(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Destination delete
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def delete_destination(
+    db: AsyncSession,
+    destination_id: uuid.UUID,
+    deleted_by: uuid.UUID,
+) -> None:
+    dest = await get_destination_by_id(db, destination_id)
+    if not dest:
+        raise NotFoundError("Destination not found")
+
+    # Block deletion if products are linked
+    product_count_result = await db.execute(
+        select(func.count(CatalogProduct.id)).where(
+            CatalogProduct.destination_id == destination_id
+        )
+    )
+    product_count = product_count_result.scalar_one()
+    if product_count > 0:
+        raise ConflictError(
+            f"Cannot delete destination: {product_count} product(s) are linked to it"
+        )
+
+    old_data = destination_to_dict(dest)
+
+    # Delete child locations first
+    for loc in dest.locations:
+        await db.delete(loc)
+
+    await db.delete(dest)
+
+    await _write_audit(
+        db, deleted_by, "catalog_destinations", destination_id, "deleted", old_data, None,
+    )
+    await db.commit()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Stats overview
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

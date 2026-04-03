@@ -218,6 +218,15 @@ async def update_destination_status(
     return _build_destination_detail(dest, recent_jobs, pipeline)
 
 
+@router.delete("/{destination_id}", status_code=204)
+async def delete_destination(
+    destination_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*ADMIN_ROLES)),
+):
+    await destination_service.delete_destination(db, destination_id, current_user.id)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Location CRUD (nested under destination)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
