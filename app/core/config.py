@@ -24,18 +24,23 @@ class Settings(BaseSettings):
     # Ahrefs
     AHREFS_API_TOKEN: str = ""
 
-    # Booking.com
-    BOOKING_COM_AFFILIATE_ID: str = ""
-    BOOKING_COM_API_KEY: str = ""
-
-    # Viator
-    VIATOR_API_KEY: str = ""
-
-    # GetYourGuide
-    GETYOURGUIDE_API_KEY: str = ""
-
     # Apify
     APIFY_API_TOKEN: str = ""
+
+    # SearchAPI
+    SEARCHAPI_KEY: str = ""
+
+    # Freepik
+    FREEPIK_API_KEY: str = ""
+
+    # OpenAI (embeddings only)
+    OPENAI_API_KEY: str = ""
+
+    # Google (Geocoding API)
+    GOOGLE_API_KEY: str = ""
+
+    # Playwright
+    PLAYWRIGHT_HEADLESS: bool = True
 
     # Cloudinary
     CLOUDINARY_CLOUD_NAME: str = ""

@@ -23,11 +23,10 @@ celery.conf.update(
 # Auto-discover task modules
 celery.autodiscover_tasks(["app.tasks"])
 
-# Beat schedule — add periodic jobs here
+# Beat schedule
 celery.conf.beat_schedule = {
-    # Example:
-    # "daily-product-sync": {
-    #     "task": "app.tasks.sync.sync_all_products",
-    #     "schedule": crontab(hour=3, minute=0),
-    # },
+    "weekly-discovery-sweep": {
+        "task": "app.tasks.scraping_tasks.weekly_discovery_sweep",
+        "schedule": crontab(hour=2, minute=0, day_of_week="monday"),
+    },
 }

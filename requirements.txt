@@ -38,3 +38,15 @@ cloudinary==1.41.0
 
 # User-Agent parsing
 user-agents==2.2.0
+
+# Web scraping
+playwright>=1.49.0
+
+# Vector embeddings (pgvector)
+pgvector>=0.3.6
+
+# OpenAI (embeddings only)
+openai>=1.59.0
+
+# Slug generation
+python-slugify>=8.0.0
