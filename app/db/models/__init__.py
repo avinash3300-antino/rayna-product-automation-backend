@@ -120,6 +120,7 @@ from app.db.models.publishing import (  # noqa: E402, F401
 )
 from app.db.models.audit import AuditAuditLog  # noqa: E402, F401
 from app.db.models.activities import Activity, ActivityEmbedding  # noqa: E402, F401
+from app.db.models.reviews import ActivityReview  # noqa: E402, F401
 from app.db.models.scraping import (  # noqa: E402, F401
     ScrapeSource,
     SourceDiscoveryRun,

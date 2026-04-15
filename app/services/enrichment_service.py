@@ -162,7 +162,18 @@ Fill in any missing fields based on your knowledge of this activity and location
                 activity.cover_image_url = images[0]["url"]
                 activity.gallery_json = images
 
-        # ── Step 4: Recalculate quality score ─────────────────────────
+        # ── Step 4: Reviews (if missing) ────────────────────────────
+        if not activity.review_count or activity.review_count == 0:
+            try:
+                from app.services.review_service import scrape_reviews_for_activity
+                await scrape_reviews_for_activity(db, activity.id)
+            except Exception as rev_exc:
+                logger.warning(
+                    "Review scraping failed for activity %s: %s",
+                    activity.id, rev_exc,
+                )
+
+        # ── Step 5: Recalculate quality score ─────────────────────────
         activity.quality_score = _calculate_quality_score(activity)
         activity.updated_at = datetime.now(timezone.utc)
 
