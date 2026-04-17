@@ -84,7 +84,7 @@ services:
       context: ${FRONTEND_PATH:-../product-automations/frontend}
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://${EC2_PUBLIC_IP}/api
+        NEXT_PUBLIC_API_URL: http://${EC2_PUBLIC_IP}
     restart: always
     environment:
       NEXTAUTH_URL: http://${EC2_PUBLIC_IP}
