@@ -12,45 +12,53 @@ from app.services.image_service import fetch_and_upload_images
 
 logger = logging.getLogger(__name__)
 
-ENRICHMENT_SYSTEM_PROMPT = """You are a travel content specialist for Rayna Tours.
-Given raw scraped data about a travel activity, produce a JSON object with these fields:
+ENRICHMENT_SYSTEM_PROMPT = """You are a professional travel content writer for Rayna Tours.
+Your job is to take RAW SCRAPED text from third-party websites and produce COMPLETELY ORIGINAL content.
 
-CONTENT (always fill these):
-- description_long (300-600 words, professional English, SEO-optimized)
-- highlights (array of 4-8 bullet point strings)
-- included (array of what's included strings)
-- excluded (array of what's excluded strings)
+═══ COPYRIGHT & ORIGINALITY RULES (NON-NEGOTIABLE) ═══
+1. NEVER copy any sentence, phrase, or distinctive wording from the scraped source text.
+2. Every description, highlight, inclusion, and exclusion MUST be written in your own words from scratch.
+3. Use the scraped text ONLY as factual reference material — extract the FACTS, then write ORIGINAL prose.
+4. If multiple source descriptions are provided, synthesize the best information from all into ONE original piece.
+5. The output must pass a plagiarism check — no phrasing should match any source verbatim.
 
-SEO (always fill these):
+═══ CONTENT FIELDS (MANDATORY — always rewrite from scratch) ═══
+- description_short (2-3 compelling sentences, 150-200 chars, original marketing copy for Rayna Tours)
+- description_long (300-600 words, professional English, SEO-optimized, engaging travel writing, COMPLETELY ORIGINAL)
+- highlights (array of 4-8 bullet point strings — rewrite each in fresh, compelling language)
+- included (array of what's included — rewrite clearly, do not copy source phrasing)
+- excluded (array of what's excluded — rewrite clearly, do not copy source phrasing)
+
+═══ SEO (always fill) ═══
 - meta_title (max 60 chars, format: "{name} in {city} | Rayna Tours")
 - meta_description (max 155 chars, compelling, includes keyword)
 - focus_keyword (primary SEO keyword for this activity)
 
-DETAILS (fill if you can determine):
+═══ DETAILS (fill if determinable) ═══
 - what_to_bring (text or null)
 - important_notes (text or null)
 - cancellation_policy (text or null)
-- cancellation_hours (integer or null — typical hours before start for free cancellation, commonly 24)
+- cancellation_hours (integer or null — typically 24)
 - fitness_level (Easy, Moderate, or Strenuous — or null)
 - difficulty (Beginner, Intermediate, or Advanced — or null)
 - languages (array of ISO 639-1 codes, e.g. ["en", "ar"])
-- sub_category (string or null — specific sub-type, e.g. "Snorkeling", "Museum Tour")
+- sub_category (string or null — e.g. "Snorkeling", "Museum Tour")
 
-LOCATION (fill if missing from extracted data):
-- meeting_point_name (string or null — common meeting/start point for this activity)
-- meeting_point_desc (string or null — directions to the meeting point)
-- address (string or null — best known address for this activity)
+═══ LOCATION (fill if missing) ═══
+- meeting_point_name (string or null)
+- meeting_point_desc (string or null)
+- address (string or null)
 
-SCHEDULING (fill if missing — use typical values for this type of activity):
-- start_times (array of time strings or null — typical departure times)
-- operating_days (array of day names or null — typical operating days)
+═══ SCHEDULING (fill if missing) ═══
+- start_times (array of time strings or null)
+- operating_days (array of day names or null)
 
-PRICING (fill from your knowledge of this specific activity):
-- price_adult (number or null — typical adult price for this activity in the given currency)
-- price_child (number or null — estimate ~60-70% of adult price if child pricing is common)
-- price_original (number or null — original price if a discount is known)
+═══ PRICING (fill from knowledge) ═══
+- price_adult (number or null)
+- price_child (number or null)
+- price_original (number or null)
 
-CRITICAL: Return null for any field you cannot determine. Never fabricate data.
+Return null for fields you cannot determine. Never fabricate factual data (prices, times, addresses).
 Return ONLY valid JSON, no markdown fences."""
 
 
@@ -60,10 +68,11 @@ async def enrich_activity(
 ) -> Activity:
     """Enrich an activity using Claude AI, geocoding, and images.
 
-    Called when quality_score < 60 or description_long is under 100 words.
+    MANDATORY for every activity — Claude rewrites ALL text content from scratch.
+    No scraped description ever goes into the final output as-is.
     """
     try:
-        # ── Step 1: Claude enrichment ─────────────────────────────────
+        # ── Step 1: Claude content rewriting & enrichment ──────────────
         prompt = f"""Activity Name: {activity.name}
 City: {activity.city}
 Country: {activity.country}
@@ -74,35 +83,75 @@ Price Adult: {activity.price_adult or 'N/A'} {activity.currency}
 Duration: {activity.duration_minutes or 'N/A'} minutes
 Source URL: {activity.source_url}
 
-Current short description:
+═══ RAW SCRAPED TEXT (use as REFERENCE ONLY — do NOT copy any phrasing) ═══
+
+Scraped short description:
 {activity.description_short or 'N/A'}
 
-Current long description:
+Scraped long description:
 {(activity.description_long or 'N/A')[:3000]}
 
-Please enrich this activity with complete, accurate information.
-Fill in any missing fields based on your knowledge of this activity and location."""
+Scraped highlights:
+{json.dumps(activity.highlights or [], indent=2) if activity.highlights else 'N/A'}
+
+Scraped inclusions:
+{json.dumps(activity.included or [], indent=2) if activity.included else 'N/A'}
+
+Scraped exclusions:
+{json.dumps(activity.excluded or [], indent=2) if activity.excluded else 'N/A'}
+
+═══ INSTRUCTIONS ═══
+1. Read the scraped text above to understand what this activity offers.
+2. Write COMPLETELY ORIGINAL content — new sentences, new phrasing, new structure.
+3. Do NOT copy or closely paraphrase any sentence from the scraped text.
+4. Fill in all missing fields based on your knowledge of this activity and location.
+5. Produce professional, engaging travel content worthy of Rayna Tours."""
 
         response_text = await claude_client.generate(
             prompt=prompt,
             system=ENRICHMENT_SYSTEM_PROMPT,
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
-            temperature=0.3,
+            temperature=0.4,
         )
 
         # Parse Claude response
-        enriched = json.loads(response_text)
+        text = response_text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+        enriched = json.loads(text)
 
-        # Apply enriched fields (only overwrite if current value is empty)
-        enrichable_fields = [
+        # Content fields — ALWAYS overwrite with Claude's original rewrite
+        content_fields = [
+            "description_short",
             "description_long",
             "highlights",
             "included",
             "excluded",
-            "meta_title",
-            "meta_description",
-            "focus_keyword",
+        ]
+        for field in content_fields:
+            value = enriched.get(field)
+            if value is not None and hasattr(activity, field):
+                setattr(activity, field, value)
+
+        # SEO fields — ALWAYS overwrite
+        seo_fields = ["meta_title", "meta_description", "focus_keyword"]
+        if "meta_title" in enriched and enriched["meta_title"]:
+            enriched["meta_title"] = enriched["meta_title"][:60]
+        if "meta_description" in enriched and enriched["meta_description"]:
+            enriched["meta_description"] = enriched["meta_description"][:155]
+        if "focus_keyword" in enriched and enriched["focus_keyword"]:
+            enriched["focus_keyword"] = enriched["focus_keyword"][:100]
+        for field in seo_fields:
+            value = enriched.get(field)
+            if value is not None and hasattr(activity, field):
+                setattr(activity, field, value)
+
+        # Other fields — only fill if currently empty/null
+        fill_if_empty_fields = [
             "what_to_bring",
             "important_notes",
             "cancellation_policy",
@@ -120,21 +169,16 @@ Fill in any missing fields based on your knowledge of this activity and location
             "price_child",
             "price_original",
         ]
-        # Truncate SEO fields to column limits
-        if "meta_title" in enriched and enriched["meta_title"]:
-            enriched["meta_title"] = enriched["meta_title"][:60]
-        if "meta_description" in enriched and enriched["meta_description"]:
-            enriched["meta_description"] = enriched["meta_description"][:155]
-        if "focus_keyword" in enriched and enriched["focus_keyword"]:
-            enriched["focus_keyword"] = enriched["focus_keyword"][:100]
-
-        for field in enrichable_fields:
+        for field in fill_if_empty_fields:
             value = enriched.get(field)
             if value is not None and hasattr(activity, field):
                 existing = getattr(activity, field)
-                # Only overwrite if existing value is empty/null/default
                 if not existing or existing == 0 or existing == [] or existing == "":
                     setattr(activity, field, value)
+
+        # Mark status as enriched
+        if activity.status == "draft":
+            activity.status = "enriched"
 
         # ── Step 2: Geocoding (if needed) ─────────────────────────────
         if activity.address and (

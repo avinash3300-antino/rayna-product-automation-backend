@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -6,9 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
+from app.db.models.activities import Activity
 from app.db.models.destinations import CatalogDestination
 from app.db.models.scraping import ScrapeJob, ScrapeSource
 from app.services.enrichment_service import enrich_activity
+from app.services.geocoding_service import geocode_activity
+from app.services.image_service import fetch_and_upload_images
+from app.services.review_service import scrape_reviews_for_activity
 from app.services.scraping_service import (
     extract_activities,
     save_extracted_activities,
@@ -100,20 +105,17 @@ async def run_activity_pipeline(
         job.status = "enriching"
         await db.flush()
 
-        # ── Step 4: Enrich saved activities ──────────────────────────
+        # ── Step 4: Enrich ALL saved activities (mandatory rewrite) ──
         enriched_count = 0
         if job.records_saved > 0:
-            from app.db.models.activities import Activity
-
-            # Get recently saved activities from this pipeline run
-            # Use a buffer because PostgreSQL now() returns transaction
-            # start time which can be earlier than Python's datetime.now()
+            # Get ALL recently saved activities — enrichment is mandatory
+            # for copyright safety (every description must be rewritten)
             enrichment_cutoff = job.started_at - timedelta(seconds=30)
             result = await db.execute(
                 select(Activity)
                 .where(
                     Activity.city_id == source.city_id,
-                    Activity.quality_score < 60,
+                    Activity.status == "draft",
                     Activity.created_at >= enrichment_cutoff,
                 )
                 .order_by(Activity.created_at.desc())
@@ -140,6 +142,25 @@ async def run_activity_pipeline(
                     )
 
         job.records_enriched = enriched_count
+
+        # ── Step 5-7: Gallery, geocoding, reviews for enriched activities ──
+        if enriched_count > 0 or job.records_saved > 0:
+            enrichment_cutoff = job.started_at - timedelta(seconds=30)
+            result = await db.execute(
+                select(Activity)
+                .where(
+                    Activity.city_id == source.city_id,
+                    Activity.created_at >= enrichment_cutoff,
+                )
+                .order_by(Activity.created_at.desc())
+                .limit(max(job.records_saved, enriched_count))
+            )
+            post_activities = list(result.scalars().all())
+
+            for activity in post_activities:
+                await _run_post_enrichment(db, activity, errors)
+
+        await db.flush()
 
         # ── Finalize ─────────────────────────────────────────────────
         job.status = "completed"
@@ -173,6 +194,129 @@ async def run_activity_pipeline(
             await db.commit()
         logger.error("Pipeline failed for source %s: %s", source.id, exc)
         raise
+
+
+async def _run_post_enrichment(
+    db: AsyncSession,
+    activity: Activity,
+    errors: list[dict],
+) -> None:
+    """Run Freepik images, geocoding, and review scraping for one activity."""
+    # ── Step 5: Gallery images (Freepik → Cloudinary) ─────────────
+    if not activity.gallery_json:
+        try:
+            gallery = await fetch_and_upload_images(
+                activity.name, activity.city, str(activity.id), num_images=8
+            )
+            if gallery:
+                activity.gallery_json = gallery
+                # Use first Freepik image as cover too
+                if not activity.cover_image_url:
+                    activity.cover_image_url = gallery[0]["url"]
+                logger.info(
+                    "Gallery: %d Freepik images for '%s'",
+                    len(gallery), activity.name,
+                )
+        except Exception as exc:
+            errors.append({
+                "activity_id": str(activity.id),
+                "error": str(exc),
+                "step": "gallery",
+            })
+            logger.warning("Gallery failed for %s: %s", activity.id, exc)
+
+    # ── Step 6: Geocoding ───────────────────────────────────────────
+    if activity.lat == 0 and activity.lng == 0:
+        try:
+            coords = await geocode_activity(
+                activity.name, activity.city, activity.country, activity.address
+            )
+            if coords["lat"] != 0:
+                activity.lat = coords["lat"]
+                activity.lng = coords["lng"]
+                logger.info(
+                    "Geocoded '%s': %s, %s",
+                    activity.name, coords["lat"], coords["lng"],
+                )
+        except Exception as exc:
+            errors.append({
+                "activity_id": str(activity.id),
+                "error": str(exc),
+                "step": "geocoding",
+            })
+            logger.warning("Geocoding failed for %s: %s", activity.id, exc)
+
+    # ── Step 7: Reviews ─────────────────────────────────────────────
+    if not activity.review_snippets:
+        try:
+            review_result = await scrape_reviews_for_activity(
+                db, activity.id, platforms=["google", "tripadvisor"]
+            )
+            logger.info(
+                "Reviews: %d scraped for '%s'",
+                review_result.get("total_scraped", 0), activity.name,
+            )
+        except Exception as exc:
+            errors.append({
+                "activity_id": str(activity.id),
+                "error": str(exc),
+                "step": "reviews",
+            })
+            logger.warning("Review scrape failed for %s: %s", activity.id, exc)
+
+    await db.flush()
+
+
+async def run_post_enrichment_for_city(
+    db: AsyncSession,
+    city_id: uuid.UUID,
+) -> dict:
+    """Run gallery, geocoding, and reviews for all activities in a city.
+
+    Use this to backfill data for activities that were scraped before
+    these pipeline steps existed.
+    """
+    result = await db.execute(
+        select(Activity).where(Activity.city_id == city_id)
+    )
+    activities = list(result.scalars().all())
+
+    if not activities:
+        raise NotFoundError("No activities found for this city")
+
+    errors: list[dict] = []
+    counts = {"gallery": 0, "geocoded": 0, "reviews": 0, "total": len(activities)}
+
+    for i, activity in enumerate(activities, 1):
+        logger.info(
+            "[%d/%d] Processing '%s'...",
+            i, len(activities), activity.name,
+        )
+        had_gallery = bool(activity.gallery_json)
+        had_coords = activity.lat != 0
+        had_reviews = bool(activity.review_snippets)
+
+        await _run_post_enrichment(db, activity, errors)
+
+        if not had_gallery and activity.gallery_json:
+            counts["gallery"] += 1
+        if not had_coords and activity.lat != 0:
+            counts["geocoded"] += 1
+        if not had_reviews and activity.review_snippets:
+            counts["reviews"] += 1
+
+        # Rate limit to avoid 429s from SearchAPI
+        if i < len(activities):
+            await asyncio.sleep(2)
+
+    await db.commit()
+
+    logger.info(
+        "Post-enrichment for city %s: %d activities, %d gallery, %d geocoded, %d reviews",
+        city_id, counts["total"], counts["gallery"],
+        counts["geocoded"], counts["reviews"],
+    )
+    return {"counts": counts, "errors": errors}
 
 
 async def run_pipeline_for_discovery(

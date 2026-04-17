@@ -11,7 +11,10 @@ from app.db.models.auth import AuthUser
 from app.db.models.scraping import ScrapeJob
 from app.schemas.destinations import PaginatedResponse
 from app.schemas.scraping import ScrapeJobResponse, ScrapeJobTriggerRequest
-from app.services.pipeline_service import run_pipeline_for_discovery
+from app.services.pipeline_service import (
+    run_pipeline_for_discovery,
+    run_post_enrichment_for_city,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scraping", tags=["scraping"])
@@ -76,6 +79,17 @@ async def list_scrape_jobs(
         per_page=per_page,
         total_pages=total_pages,
     )
+
+
+@router.post("/post-enrich/{city_id}")
+async def trigger_post_enrichment(
+    city_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Run gallery images, geocoding, and reviews for all activities in a city."""
+    result = await run_post_enrichment_for_city(db, city_id)
+    return result
 
 
 @router.get("/jobs/{job_id}", response_model=ScrapeJobResponse)

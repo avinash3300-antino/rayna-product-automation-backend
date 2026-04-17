@@ -68,6 +68,18 @@ async def _write_audit(
 # ── List Activities ──────────────────────────────────────────────────────
 
 
+@router.get("/cities", response_model=list[str])
+async def list_activity_cities(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return distinct city names from activities, sorted alphabetically."""
+    result = await db.execute(
+        select(Activity.city).where(Activity.city.isnot(None)).distinct().order_by(Activity.city)
+    )
+    return [row[0] for row in result.all()]
+
+
 @router.get("", response_model=PaginatedResponse[ActivityCard])
 async def list_activities(
     current_user: CurrentUser,
@@ -75,6 +87,7 @@ async def list_activities(
     category: str | None = Query(None),
     sub_category: str | None = Query(None),
     city_id: UUID | None = Query(None),
+    city: str | None = Query(None),
     min_price: float | None = Query(None),
     max_price: float | None = Query(None),
     free_cancellation: bool | None = Query(None),
@@ -99,6 +112,9 @@ async def list_activities(
     if city_id:
         query = query.where(Activity.city_id == city_id)
         count_query = count_query.where(Activity.city_id == city_id)
+    if city:
+        query = query.where(Activity.city.ilike(city))
+        count_query = count_query.where(Activity.city.ilike(city))
     if min_price is not None:
         query = query.where(Activity.price_from >= min_price)
         count_query = count_query.where(Activity.price_from >= min_price)

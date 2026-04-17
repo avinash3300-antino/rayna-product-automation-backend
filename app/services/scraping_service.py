@@ -13,7 +13,7 @@ from app.integrations.apify_client import apify_client
 from app.integrations.claude_client import claude_client
 from app.integrations.jina_client import jina_client
 from app.integrations.playwright_scraper import playwright_scraper
-from app.services.dedup_service import check_duplicate, compute_dedupe_hash
+from app.services.dedup_service import check_duplicate, compute_dedupe_hash, merge_or_save
 
 logger = logging.getLogger(__name__)
 
@@ -22,51 +22,62 @@ Given a cleaned markdown page, extract ALL travel activities/tours/experiences a
 Each item MUST have these fields (return null if not found — NEVER fabricate):
 
 CORE IDENTITY:
-- name (string, required — full display title)
-- description_short (2-3 sentences, 150-200 characters)
-- description_long (full description if available, 300-600 words)
-- category (Adventure, Cultural, Water Sports, Nature, Day Trip, Wellness, Entertainment)
-- sub_category (string or null — e.g. "Snorkeling", "Museum Tour", "Cooking Class")
+- name (string, required — full display title, clean of emojis/special chars)
+- raw_description_short (2-3 sentences EXACTLY as found on the page — extract verbatim, do NOT rephrase)
+- raw_description_long (full description EXACTLY as found on the page — extract verbatim, do NOT rephrase.
+  Combine all descriptive paragraphs found — include overview, what-to-expect sections, itinerary text.)
+- category (Adventure, Cultural, Water Sports, Nature, Day Trip, Wellness, Entertainment, Food & Drink, Nightlife, Luxury)
+- sub_category (string or null — e.g. "Snorkeling", "Museum Tour", "Cooking Class", "Desert Safari")
 - activity_type (Group tour, Private tour, Self-guided, Transfer-included)
 
-PRICING:
-- price_adult (number or null)
+PRICING (extract numbers only, no currency symbols):
+- price_adult (number or null — "from" price counts, prefer the lowest advertised adult price)
 - price_child (number or null — child ticket price if listed, typically age 3-11)
-- price_original (number or null — original pre-discount price if strikethrough shown)
-- currency (3-letter ISO code — detect from page symbols: £=GBP, $=USD, €=EUR, د.إ=AED)
+- price_original (number or null — original pre-discount price if strikethrough/crossed-out shown)
+- currency (3-letter ISO code — detect from page symbols: £=GBP, $=USD, €=EUR, د.إ=AED, ₹=INR, ¥=JPY)
 - price_type (Per person, Per group, Per vehicle — default "Per person")
 - discount_pct (number 0-100 or null — percentage discount if shown)
 
 BOOKING & AVAILABILITY:
-- duration_minutes (integer or null)
+- duration_minutes (integer or null — convert: "2 hours"→120, "half day"→240, "full day"→480, "3h 30m"→210)
 - free_cancellation (boolean — true if "free cancellation" mentioned anywhere)
 - instant_confirmation (boolean — true if "instant confirmation" or "instant booking" mentioned)
 - cancellation_hours (integer or null — hours before start for free cancellation, e.g. 24)
-- start_times (array of time strings like "09:00", "14:00" or null)
-- operating_days (array of day names like "Mon","Tue","Wed" or null)
+- start_times (array of time strings like "09:00", "14:00" or null — look for departure/pickup times)
+- operating_days (array of day names like "Mon","Tue","Wed" or null — look for "available daily" → all 7 days)
 - min_age (integer or null — minimum age requirement)
 
 LOCATION:
-- address (string or null — full street address)
+- address (string or null — full street address, NOT just the city name)
 - meeting_point_name (string or null — e.g. "Main entrance of Tower of London")
 - meeting_point_desc (string or null — directions to meeting point)
 - pickup_available (boolean — true if hotel/location pickup is mentioned)
 - hotel_pickup_included (boolean — true if hotel pickup is specifically included free)
 
 REVIEWS:
-- rating (number 0-5 or null)
-- review_count (integer or null)
+- rating (number 0-5 or null — convert from other scales: "4.5/5"→4.5, "9/10"→4.5)
+- review_count (integer or null — extract "1,234 reviews" → 1234)
 
-CONTENT:
-- highlights (array of 4-8 strings or null)
-- included (array of strings or null — what's included)
-- excluded (array of strings or null — what's not included)
+CONTENT (extract verbatim):
+- raw_highlights (array of 4-8 strings EXACTLY as found — look for bullet points, key features, "why choose this")
+- raw_included (array of strings EXACTLY as found — what's included: transport, meals, tickets, guide, etc.)
+- raw_excluded (array of strings EXACTLY as found — what's not included)
 
 OTHER:
-- languages (array of ISO codes like "en","fr" or null)
+- languages (array of ISO codes like "en","ar","fr" or null)
 - operator_name (string or null — company running the activity)
 - source_url (string or null — URL of this specific activity page)
-- cover_image_url (string or null — URL of the main hero/cover image on the page)
+- cover_image_url (string or null — URL of the main hero/cover image, must be a full URL)
+
+═══ EXTRACTION QUALITY RULES ═══
+1. All "raw_" prefixed fields must contain VERBATIM text from the source page.
+   Do NOT clean up, rephrase, or improve them — extract exactly what the page says.
+2. For listing pages with many activities, extract EACH one separately with whatever data is available.
+3. For detail pages with one activity, extract EVERYTHING available — be thorough.
+4. Prefer SPECIFIC data over generic: "Desert Safari in Dubai" is better than "Safari Tour".
+5. If price is shown as a range like "$50-$100", use the lower value for price_adult.
+6. Extract duration even from vague text: "morning tour" → 240, "2-3 hours" → 150.
+7. NEVER make up prices, ratings, or addresses. Only extract what's on the page.
 
 Return ONLY a valid JSON array. If no activities found, return []."""
 
@@ -220,14 +231,57 @@ async def save_extracted_activities(
 
         city = item.get("city") or city_name
         category = item.get("category") or source.category
-        description = item.get("description_short") or ""
+        # Use raw_ fields from new extraction, fall back to old field names
+        raw_desc_short = item.get("raw_description_short") or item.get("description_short") or ""
+        raw_desc_long = item.get("raw_description_long") or item.get("description_long") or ""
+        raw_highlights = item.get("raw_highlights") or item.get("highlights") or []
+        raw_included = item.get("raw_included") or item.get("included") or []
+        raw_excluded = item.get("raw_excluded") or item.get("excluded") or []
 
         # Dedup check
         dedup_result = await check_duplicate(
-            db, name, city, category, description
+            db, name, city, category, raw_desc_short
         )
         if dedup_result["is_duplicate"]:
-            counts["skipped_dup"] += 1
+            if dedup_result["match_type"] == "semantic":
+                # Semantic duplicate → merge content via Claude rewrite
+                merge_data = {
+                    "description_short": raw_desc_short,
+                    "description_long": raw_desc_long,
+                    "highlights": raw_highlights,
+                    "included": raw_included,
+                    "excluded": raw_excluded,
+                    "price_adult": item.get("price_adult"),
+                    "price_child": item.get("price_child"),
+                    "price_original": item.get("price_original"),
+                    "rating": item.get("rating"),
+                    "review_count": item.get("review_count"),
+                    "gallery_json": item.get("gallery_json"),
+                    "cover_image_url": item.get("cover_image_url"),
+                    "start_times": item.get("start_times"),
+                    "operating_days": item.get("operating_days"),
+                    "address": item.get("address"),
+                    "meeting_point_name": item.get("meeting_point_name"),
+                }
+                try:
+                    await merge_or_save(
+                        db, merge_data,
+                        dedup_result["existing_id"],
+                        dedup_result["match_type"],
+                    )
+                    counts["skipped_dup"] += 1
+                    logger.info(
+                        "Merged semantic duplicate '%s' into existing %s",
+                        name, dedup_result["existing_id"],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Merge failed for '%s': %s", name, exc
+                    )
+                    counts["skipped_dup"] += 1
+            else:
+                # Exact duplicate → skip entirely
+                counts["skipped_dup"] += 1
             continue
 
         # Generate unique slug
@@ -243,6 +297,7 @@ async def save_extracted_activities(
             slug = f"{base_slug}-{counter}"
             counter += 1
 
+        # Store raw scraped text as placeholders — enrichment will rewrite them
         activity = Activity(
             name=name,
             slug=slug,
@@ -252,11 +307,11 @@ async def save_extracted_activities(
             activity_type=item.get("activity_type") or "Group tour",
             tags=item.get("tags"),
             status="draft",
-            description_short=item.get("description_short") or name,
-            description_long=item.get("description_long") or "",
-            highlights=item.get("highlights") or [],
-            included=item.get("included") or [],
-            excluded=item.get("excluded") or [],
+            description_short=raw_desc_short or name,
+            description_long=raw_desc_long,
+            highlights=raw_highlights,
+            included=raw_included,
+            excluded=raw_excluded,
             price_adult=item.get("price_adult") or 0,
             price_child=item.get("price_child"),
             price_original=item.get("price_original"),

@@ -8,13 +8,16 @@ JINA_READER_URL = "https://r.jina.ai"
 class JinaClient:
     """Jina AI Reader — converts URLs to clean markdown. Free, no API key."""
 
-    async def clean_page(self, url: str) -> str:
+    async def clean_page(self, url: str, include_images: bool = False) -> str:
         """Fetch a URL through Jina Reader and return clean markdown."""
         try:
+            headers = {"Accept": "text/plain"}
+            if include_images:
+                headers["X-With-Images"] = "true"
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.get(
                     f"{JINA_READER_URL}/{url}",
-                    headers={"Accept": "text/plain"},
+                    headers=headers,
                 )
                 response.raise_for_status()
                 return response.text
