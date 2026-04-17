@@ -89,6 +89,7 @@ services:
     environment:
       NEXTAUTH_URL: http://${EC2_PUBLIC_IP}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      INTERNAL_API_URL: http://backend:8000
 
   # ── Nginx Reverse Proxy ──────────────────────────────────
   nginx:
