@@ -25,16 +25,17 @@ clone_repos() {
     echo "[2/6] Cloning repositories..."
     mkdir -p ~/apps && cd ~/apps
 
+    BACKEND_REPO="https://github.com/avinash3300-antino/rayna-product-automation-backend.git"
+    FRONTEND_REPO="https://github.com/avinash3300-antino/rayna-product-automation-frontend.git"
+
     if [ ! -d "backend" ]; then
-        read -p "Enter backend repo URL: " BACKEND_REPO
         git clone "$BACKEND_REPO" backend
     else
         echo "  Backend repo already exists, pulling latest..."
         cd backend && git pull && cd ..
     fi
 
-    if [ ! -d "frontend" ]; then
-        read -p "Enter frontend repo URL: " FRONTEND_REPO
+    if [ ! -d "frontend-repo" ]; then
         git clone "$FRONTEND_REPO" frontend-repo
         # The frontend code is inside frontend-repo/frontend/
     else
@@ -82,6 +83,32 @@ run_migrations() {
     echo "[6/6] Running database migrations..."
     cd ~/apps/backend
     docker compose exec backend alembic upgrade head
+    echo "  Migrations complete."
+}
+
+# ── Step 7: Seed admin user ───────────────
+seed_db() {
+    echo "[7] Seeding admin user..."
+    cd ~/apps/backend
+    docker compose exec backend python seed.py
+    echo "  Seed complete."
+}
+
+# ── Step 8: Restore local data ────────────
+restore_data() {
+    echo "[8] Restoring database from dump..."
+    cd ~/apps/backend
+    if [ -f "rayna_db_dump.sql" ]; then
+        PGPASSWORD=$(grep POSTGRES_PASSWORD .env | cut -d '=' -f2)
+        docker compose exec -T postgres psql -U postgres -d rayna_db < rayna_db_dump.sql
+        echo "  Data restored."
+    else
+        echo "  No rayna_db_dump.sql found. Skipping restore."
+        echo "  Upload it with: scp rayna_db_dump.sql ubuntu@EC2_IP:~/apps/backend/"
+    fi
+}
+
+show_info() {
     echo ""
     echo "========================================="
     echo "  Deployment Complete!"
@@ -92,6 +119,7 @@ run_migrations() {
     echo "  API:       http://$EC2_IP/api/v1"
     echo "  API Docs:  http://$EC2_IP/docs"
     echo "  Health:    http://$EC2_IP/health"
+    echo "  Login:     admin@raynatours.com / Admin@1234"
     echo ""
     docker compose ps
 }
@@ -103,6 +131,8 @@ case "${1:-all}" in
     env)        setup_env ;;
     build)      start_services ;;
     migrate)    run_migrations ;;
+    seed)       seed_db ;;
+    restore)    restore_data ;;
     all)
         install_docker
         clone_repos
@@ -110,9 +140,11 @@ case "${1:-all}" in
         update_frontend_path
         start_services
         run_migrations
+        seed_db
+        show_info
         ;;
     *)
-        echo "Usage: $0 {docker|clone|env|build|migrate|all}"
+        echo "Usage: $0 {docker|clone|env|build|migrate|seed|restore|all}"
         exit 1
         ;;
 esac

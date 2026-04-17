@@ -16,6 +16,7 @@ build/
 
 # Environment variables
 .env
+.env.docker
 
 # IDE
 .vscode/
