@@ -39,6 +39,9 @@ aioboto3>=13.0.0
 # Image processing
 Pillow>=10.0.0
 
+# Cloudinary (image hosting)
+cloudinary>=1.36.0
+
 # User-Agent parsing
 user-agents==2.2.0
 
