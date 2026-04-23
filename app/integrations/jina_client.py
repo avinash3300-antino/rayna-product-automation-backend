@@ -11,10 +11,13 @@ class JinaClient:
     async def clean_page(self, url: str, include_images: bool = False) -> str:
         """Fetch a URL through Jina Reader and return clean markdown."""
         try:
-            headers = {"Accept": "text/plain"}
+            headers = {
+                "Accept": "text/plain",
+                "X-No-Cache": "true",
+            }
             if include_images:
                 headers["X-With-Images"] = "true"
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
                 response = await client.get(
                     f"{JINA_READER_URL}/{url}",
                     headers=headers,

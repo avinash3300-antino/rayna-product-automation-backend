@@ -10,12 +10,14 @@ from pydantic import BaseModel, Field
 class SourceDiscoveryRequest(BaseModel):
     city_id: UUID
     category: str = Field(min_length=1, max_length=100)
+    product_type: str = Field(default="activities", max_length=50)
 
 
 class SourceDiscoveryRunResponse(BaseModel):
     id: UUID
     city_id: UUID
     category: str
+    product_type: str = "activities"
     status: str
     ahrefs_results: dict | None = None
     searchapi_results: dict | None = None
@@ -37,6 +39,7 @@ class ScrapeSourceResponse(BaseModel):
     id: UUID
     city_id: UUID
     category: str
+    product_type: str = "activities"
     source_name: str
     source_url: str
     tier: int
@@ -70,6 +73,7 @@ class ScrapeJobResponse(BaseModel):
     discovery_run_id: UUID | None = None
     city_id: UUID
     category: str
+    product_type: str = "activities"
     status: str
     source_id: UUID | None = None
     source_url: str
@@ -90,3 +94,4 @@ class ScrapeJobResponse(BaseModel):
 class ScrapeJobTriggerRequest(BaseModel):
     discovery_run_id: UUID
     category: str = Field(min_length=1, max_length=100)
+    product_type: str = Field(default="activities", max_length=50)

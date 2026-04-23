@@ -35,6 +35,7 @@ async def trigger_discovery(
         db,
         city_id=body.city_id,
         category=body.category,
+        product_type=body.product_type,
         triggered_by=current_user.id,
     )
     return SourceDiscoveryRunResponse.model_validate(run)
@@ -111,6 +112,7 @@ async def add_manual_source(
         source_name=body.source_name,
         tier=body.tier,
         actor_id=current_user.id,
+        product_type=run.product_type or "activities",
         discovery_run_id=run_id,
     )
     return ScrapeSourceResponse.model_validate(source)

@@ -1,86 +1,123 @@
 import logging
 
-import cloudinary
-import cloudinary.uploader
-
-from app.core.config import settings
 from app.integrations.freepik_client import freepik_client
+from app.integrations.pexels_client import pexels_client
+from app.integrations.unsplash_client import unsplash_client
+from app.services.s3_service import upload_from_url
 
 logger = logging.getLogger(__name__)
 
+MIN_GALLERY_IMAGES = 8
 
-def _configure_cloudinary() -> None:
-    cloudinary.config(
-        cloud_name=settings.CLOUDINARY_CLOUD_NAME,
-        api_key=settings.CLOUDINARY_API_KEY,
-        api_secret=settings.CLOUDINARY_API_SECRET,
-        secure=True,
-    )
+
+async def _search_freepik(query: str, limit: int) -> list[dict]:
+    """Search Freepik, return results or empty list on failure."""
+    try:
+        return await freepik_client.search_images(query, limit=limit)
+    except Exception as exc:
+        logger.warning("Freepik search failed for '%s': %s", query, exc)
+        return []
+
+
+async def _search_pexels(query: str, limit: int) -> list[dict]:
+    """Search Pexels, return results or empty list on failure."""
+    try:
+        return await pexels_client.search_images(query, limit=limit)
+    except Exception as exc:
+        logger.warning("Pexels search failed for '%s': %s", query, exc)
+        return []
+
+
+async def _search_unsplash(query: str, limit: int) -> list[dict]:
+    """Search Unsplash, return results or empty list on failure."""
+    try:
+        return await unsplash_client.search_images(query, limit=limit)
+    except Exception as exc:
+        logger.warning("Unsplash search failed for '%s': %s", query, exc)
+        return []
+
+
+async def _search_all_sources(query: str, limit: int) -> list[dict]:
+    """Search Freepik -> Pexels -> Unsplash, return first successful results."""
+    # Try Freepik first
+    results = await _search_freepik(query, limit)
+    if results:
+        return results
+
+    # Fallback to Pexels
+    results = await _search_pexels(query, limit)
+    if results:
+        return results
+
+    # Fallback to Unsplash
+    results = await _search_unsplash(query, limit)
+    return results
 
 
 async def fetch_and_upload_images(
-    activity_name: str,
+    product_name: str,
     city: str,
-    activity_id: str,
+    product_id: str,
+    product_type: str = "activities",
     num_images: int = 8,
 ) -> list[dict]:
-    """Search Freepik → upload to Cloudinary → return image metadata.
+    """Search Freepik/Pexels/Unsplash -> upload to Cloudinary -> return image metadata.
 
-    Returns list of {url, alt_text, size_variant} dicts.
-    Sets cover_image_url from the first result.
+    Tries multiple search queries with fallback across image providers
+    to ensure minimum 8 images.
+    Returns list of {url, alt_text, s3_key} dicts.
     """
-    try:
-        results = await freepik_client.search_images(
-            f"{activity_name} {city}", limit=num_images
-        )
-    except Exception as exc:
-        logger.warning(
-            "Freepik search failed for '%s %s': %s",
-            activity_name,
-            city,
-            exc,
-        )
+    num_images = max(num_images, MIN_GALLERY_IMAGES)
+
+    # Try progressively broader searches to get enough images
+    search_queries = [
+        f"{product_name} {city}",
+        f"{product_name} tourism",
+        f"{city} travel tourism",
+    ]
+
+    all_results: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for query in search_queries:
+        if len(all_results) >= num_images:
+            break
+        results = await _search_all_sources(query, limit=num_images)
+        for r in results:
+            url = r.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                all_results.append(r)
+
+    if not all_results:
         return []
 
-    if not results:
-        return []
-
-    _configure_cloudinary()
     gallery: list[dict] = []
 
-    for i, img in enumerate(results):
+    for i, img in enumerate(all_results[:num_images]):
         image_url = img.get("url", "")
         if not image_url:
             continue
 
-        try:
-            # Upload original and let Cloudinary handle transformations
-            upload_result = cloudinary.uploader.upload(
-                image_url,
-                folder=f"rayna/activities/{activity_id}",
-                public_id=str(i),
-                overwrite=True,
-                transformation=[
-                    {"width": 1200, "height": 800, "crop": "fill"},
-                    {"quality": "auto", "fetch_format": "auto"},
-                ],
-                resource_type="image",
-            )
+        s3_key = f"{product_type}/{product_id}/gallery/{i}.webp"
 
-            base_url = upload_result["secure_url"]
-            public_id = upload_result["public_id"]
+        try:
+            s3_url = await upload_from_url(
+                source_url=image_url,
+                key=s3_key,
+                resize=(1200, 800),
+            )
 
             gallery.append(
                 {
-                    "url": base_url,
-                    "alt_text": f"{activity_name} - image {i + 1}",
-                    "size_variant": "detail",
-                    "cloudinary_id": public_id,
+                    "url": s3_url,
+                    "alt_text": f"{product_name} - image {i + 1}",
+                    "s3_key": s3_key,
                 }
             )
         except Exception as exc:
             logger.warning(
-                "Cloudinary upload failed for image %d: %s", i, exc
+                "Upload failed for image %d: %s", i, exc
             )
             continue
 

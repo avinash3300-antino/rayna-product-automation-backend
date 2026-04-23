@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     # Freepik
     FREEPIK_API_KEY: str = ""
 
+    # Pexels
+    PEXELS_API_KEY: str = ""
+
+    # Unsplash
+    UNSPLASH_ACCESS_KEY: str = ""
+
     # OpenAI (embeddings only)
     OPENAI_API_KEY: str = ""
 
@@ -42,10 +48,19 @@ class Settings(BaseSettings):
     # Playwright
     PLAYWRIGHT_HEADLESS: bool = True
 
-    # Cloudinary
+    # AWS S3
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = "us-east-1"
+    AWS_S3_BUCKET: str = ""
+
+    # Cloudinary (temporary — used when IMAGE_STORAGE=cloudinary)
     CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
+
+    # Toggle: "s3" or "cloudinary"
+    IMAGE_STORAGE: str = "cloudinary"
 
     # App
     ENVIRONMENT: str = "dev"

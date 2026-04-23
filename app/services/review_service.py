@@ -1,21 +1,30 @@
+"""Review service — shared across all product types."""
+
 import json
 import logging
 from uuid import UUID
 
 import httpx
-from sqlalchemy import func, select, delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import ExternalServiceError, NotFoundError
+from app.core.exceptions import NotFoundError
 from app.db.models.activities import Activity
-from app.db.models.reviews import ActivityReview
+from app.db.models.cruises import CruiseProduct
+from app.db.models.reviews import ProductReview
 from app.integrations.claude_client import claude_client
 from app.integrations.jina_client import jina_client
 
 logger = logging.getLogger(__name__)
 
 SEARCHAPI_BASE = "https://www.searchapi.io/api/v1/search"
+
+# Maps product_type → SQLAlchemy model
+MODEL_REGISTRY: dict[str, type] = {
+    "activities": Activity,
+    "cruises": CruiseProduct,
+}
 
 REVIEW_EXTRACTION_PROMPT = """You are a review extraction specialist. Given raw web page content, extract real user reviews.
 
@@ -36,23 +45,34 @@ RULES:
 - If no reviews found, return empty array: []"""
 
 
-async def get_reviews_for_activity(
+def _get_model(product_type: str):
+    model = MODEL_REGISTRY.get(product_type)
+    if model is None:
+        raise ValueError(f"Unknown product_type '{product_type}' for reviews")
+    return model
+
+
+async def get_reviews_for_product(
     db: AsyncSession,
-    activity_id: UUID,
+    product_id: UUID,
+    product_type: str = "activities",
 ) -> dict:
-    """Get all stored reviews for an activity."""
-    activity = await db.get(Activity, activity_id)
-    if not activity:
-        raise NotFoundError("Activity not found")
+    """Get all stored reviews for a product."""
+    model = _get_model(product_type)
+    product = await db.get(model, product_id)
+    if not product:
+        raise NotFoundError(f"{product_type} product not found")
 
     result = await db.execute(
-        select(ActivityReview)
-        .where(ActivityReview.activity_id == activity_id)
-        .order_by(ActivityReview.rating.desc().nullslast(), ActivityReview.created_at.desc())
+        select(ProductReview)
+        .where(
+            ProductReview.product_type == product_type,
+            ProductReview.product_id == product_id,
+        )
+        .order_by(ProductReview.rating.desc().nullslast(), ProductReview.created_at.desc())
     )
     reviews = list(result.scalars().all())
 
-    # Calculate stats
     ratings = [float(r.rating) for r in reviews if r.rating is not None]
     avg_rating = sum(ratings) / len(ratings) if ratings else None
 
@@ -61,7 +81,8 @@ async def get_reviews_for_activity(
         platform_counts[r.source_platform] = platform_counts.get(r.source_platform, 0) + 1
 
     return {
-        "activity_id": activity_id,
+        "product_id": product_id,
+        "product_type": product_type,
         "total": len(reviews),
         "avg_rating": round(avg_rating, 2) if avg_rating else None,
         "platform_counts": platform_counts,
@@ -69,15 +90,27 @@ async def get_reviews_for_activity(
     }
 
 
-async def scrape_reviews_for_activity(
+async def scrape_reviews_for_product(
     db: AsyncSession,
-    activity_id: UUID,
+    product_id: UUID,
+    product_type: str = "activities",
+    product_name: str | None = None,
+    product_city: str | None = None,
+    product_country: str | None = None,
+    operator_name: str | None = None,
     platforms: list[str] | None = None,
 ) -> dict:
-    """Scrape reviews from multiple platforms for an activity."""
-    activity = await db.get(Activity, activity_id)
-    if not activity:
-        raise NotFoundError("Activity not found")
+    """Scrape reviews from multiple platforms for any product type."""
+    model = _get_model(product_type)
+    product = await db.get(model, product_id)
+    if not product:
+        raise NotFoundError(f"{product_type} product not found")
+
+    # Use product attrs if not explicitly passed
+    name = product_name or product.name
+    city = product_city or product.city
+    country = product_country or product.country
+    op_name = operator_name or getattr(product, "operator_name", None)
 
     if platforms is None:
         platforms = ["google", "tripadvisor", "trustpilot"]
@@ -88,11 +121,11 @@ async def scrape_reviews_for_activity(
     for platform in platforms:
         try:
             if platform == "google":
-                reviews = await _scrape_google_reviews(activity, max_reviews=10)
+                reviews = await _scrape_google_reviews(name, city, country, max_reviews=10)
             elif platform == "tripadvisor":
-                reviews = await _scrape_tripadvisor_reviews(activity, max_reviews=10)
+                reviews = await _scrape_tripadvisor_reviews(name, city, max_reviews=10)
             elif platform == "trustpilot":
-                reviews = await _scrape_trustpilot_reviews(activity, max_reviews=10)
+                reviews = await _scrape_trustpilot_reviews(op_name or name, city, max_reviews=10)
             else:
                 continue
 
@@ -101,16 +134,16 @@ async def scrape_reviews_for_activity(
             all_reviews.extend(reviews)
             logger.info(
                 "Scraped %d reviews from %s for '%s'",
-                len(reviews), platform, activity.name,
+                len(reviews), platform, name,
             )
         except Exception as exc:
             logger.warning(
                 "Failed to scrape %s reviews for '%s': %s",
-                platform, activity.name, exc,
+                platform, name, exc,
             )
             errors.append(f"{platform}: {exc}")
 
-    # Filter out reviews with missing required fields
+    # Filter
     all_reviews = [
         r for r in all_reviews
         if r.get("review_text") and len(r.get("review_text", "")) >= 10
@@ -119,12 +152,16 @@ async def scrape_reviews_for_activity(
     # Delete existing reviews and insert new ones
     if all_reviews:
         await db.execute(
-            delete(ActivityReview).where(ActivityReview.activity_id == activity_id)
+            delete(ProductReview).where(
+                ProductReview.product_type == product_type,
+                ProductReview.product_id == product_id,
+            )
         )
 
         for r in all_reviews:
-            review = ActivityReview(
-                activity_id=activity_id,
+            review = ProductReview(
+                product_type=product_type,
+                product_id=product_id,
                 reviewer_name=r.get("reviewer_name") or "Anonymous",
                 rating=r.get("rating"),
                 review_title=r.get("review_title"),
@@ -137,16 +174,19 @@ async def scrape_reviews_for_activity(
             )
             db.add(review)
 
-        # Update activity review stats
+        # Update product review stats
         ratings = [r["rating"] for r in all_reviews if r.get("rating")]
         if ratings:
-            activity.rating = round(sum(ratings) / len(ratings), 2)
-            activity.review_count = len(all_reviews)
+            product.rating = round(sum(ratings) / len(ratings), 2)
+            product.review_count = len(all_reviews)
 
-            # Rating distribution
-            activity.rating_5 = sum(1 for x in ratings if x >= 4.5)
-            activity.rating_4 = sum(1 for x in ratings if 3.5 <= x < 4.5)
-            activity.rating_3 = sum(1 for x in ratings if x < 3.5)
+            product.rating_5 = sum(1 for x in ratings if x >= 4.5)
+            product.rating_4 = sum(1 for x in ratings if 3.5 <= x < 4.5)
+            product.rating_3 = sum(1 for x in ratings if x < 3.5)
+            if hasattr(product, "rating_2"):
+                product.rating_2 = 0
+            if hasattr(product, "rating_1"):
+                product.rating_1 = 0
 
             # Review snippets (top 5 short reviews)
             snippets = []
@@ -156,31 +196,52 @@ async def scrape_reviews_for_activity(
                     snippets.append(text[:200])
                 if len(snippets) >= 5:
                     break
-            activity.review_snippets = snippets
+            product.review_snippets = snippets
 
         await db.flush()
 
     return {
-        "activity_id": activity_id,
+        "product_id": product_id,
+        "product_type": product_type,
         "total_scraped": len(all_reviews),
         "platforms": {p: sum(1 for r in all_reviews if r.get("source_platform") == p) for p in platforms},
         "errors": errors,
     }
 
 
+# ── Backward compatibility aliases ──────────────────────────────────────
+
+
+async def get_reviews_for_activity(db: AsyncSession, activity_id: UUID) -> dict:
+    return await get_reviews_for_product(db, activity_id, product_type="activities")
+
+
+async def scrape_reviews_for_activity(
+    db: AsyncSession,
+    activity_id: UUID,
+    platforms: list[str] | None = None,
+) -> dict:
+    return await scrape_reviews_for_product(
+        db, activity_id, product_type="activities", platforms=platforms,
+    )
+
+
 # ── Google Reviews (via SearchAPI) ───────────────────────────────────────
 
 
-async def _scrape_google_reviews(activity: Activity, max_reviews: int = 10) -> list[dict]:
+async def _scrape_google_reviews(
+    product_name: str,
+    city: str,
+    country: str,
+    max_reviews: int = 10,
+) -> list[dict]:
     """Scrape Google Maps reviews using SearchAPI."""
-    # Step 1: Find the place on Google Maps
-    query = f"{activity.name} {activity.city} {activity.country}"
+    query = f"{product_name} {city} {country}"
     data_id = await _find_google_place(query)
     if not data_id:
-        logger.info("No Google Maps place found for '%s'", activity.name)
+        logger.info("No Google Maps place found for '%s'", product_name)
         return []
 
-    # Step 2: Get reviews for this place
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(
@@ -244,31 +305,34 @@ async def _find_google_place(query: str) -> str | None:
 # ── TripAdvisor Reviews (via Jina + Claude) ──────────────────────────────
 
 
-async def _scrape_tripadvisor_reviews(activity: Activity, max_reviews: int = 10) -> list[dict]:
-    """Find TripAdvisor page and extract reviews with Jina + Claude."""
-    # Find TripAdvisor page via SearchAPI
-    query = f"site:tripadvisor.com {activity.name} {activity.city}"
+async def _scrape_tripadvisor_reviews(
+    product_name: str,
+    city: str,
+    max_reviews: int = 10,
+) -> list[dict]:
+    """Find TripAdvisor page and extract reviews."""
+    query = f"site:tripadvisor.com {product_name} {city}"
     url = await _find_review_page(query, "tripadvisor.com")
     if not url:
-        logger.info("No TripAdvisor page found for '%s'", activity.name)
+        logger.info("No TripAdvisor page found for '%s'", product_name)
         return []
-
     return await _extract_reviews_from_url(url, "tripadvisor", max_reviews)
 
 
 # ── Trustpilot Reviews (via Jina + Claude) ───────────────────────────────
 
 
-async def _scrape_trustpilot_reviews(activity: Activity, max_reviews: int = 10) -> list[dict]:
-    """Find Trustpilot page and extract reviews with Jina + Claude."""
-    # For Trustpilot, search for the operator name or activity
-    operator = activity.operator_name or activity.name
-    query = f"site:trustpilot.com {operator} {activity.city}"
+async def _scrape_trustpilot_reviews(
+    operator_or_name: str,
+    city: str,
+    max_reviews: int = 10,
+) -> list[dict]:
+    """Find Trustpilot page and extract reviews."""
+    query = f"site:trustpilot.com {operator_or_name} {city}"
     url = await _find_review_page(query, "trustpilot.com")
     if not url:
-        logger.info("No Trustpilot page found for '%s'", activity.name)
+        logger.info("No Trustpilot page found for '%s'", operator_or_name)
         return []
-
     return await _extract_reviews_from_url(url, "trustpilot", max_reviews)
 
 
@@ -315,7 +379,6 @@ async def _extract_reviews_from_url(
     if not page_content or len(page_content) < 100:
         return []
 
-    # Truncate to fit in Claude context
     page_content = page_content[:15000]
 
     prompt = f"""Extract reviews from this {platform} page.
@@ -336,7 +399,6 @@ Extract up to {max_reviews} real reviews with rating, reviewer name, review text
             temperature=0.1,
         )
 
-        # Parse JSON — handle markdown fences
         text = response_text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else text[3:]
@@ -348,7 +410,6 @@ Extract up to {max_reviews} real reviews with rating, reviewer name, review text
         if not isinstance(reviews, list):
             return []
 
-        # Add source URL to each review
         for r in reviews:
             r["source_url"] = url
 

@@ -33,8 +33,11 @@ python-dotenv==1.1.0
 # ASGI
 python-multipart==0.0.20
 
-# Cloudinary
-cloudinary==1.41.0
+# AWS S3
+aioboto3>=13.0.0
+
+# Image processing
+Pillow>=10.0.0
 
 # User-Agent parsing
 user-agents==2.2.0

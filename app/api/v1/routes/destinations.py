@@ -15,13 +15,13 @@ from app.schemas.destinations import (
     DestinationStatsOverview,
     DestinationStatusUpdate,
     DestinationUpdate,
-    IngestionJobBrief,
-    LastIngestionRunBrief,
+    LastScrapeRunBrief,
     LocationCreate,
     LocationResponse,
     LocationUpdate,
     PaginatedResponse,
     ProductCountSummary,
+    ScrapeJobBrief,
 )
 from app.services import destination_service
 
@@ -40,19 +40,17 @@ ADMIN_ROLES = ("admin",)
 def _build_destination_list_item(
     dest,
     product_counts_map: dict,
-    last_ingestion_map: dict,
+    last_scrape_map: dict,
 ) -> DestinationListItem:
     counts = product_counts_map.get(dest.id, {})
-    hotels = counts.get("hotels", 0)
-    attractions = counts.get("attractions", 0)
-    transfers = counts.get("transfers", 0)
-    restaurants = counts.get("restaurants", 0)
-    total = hotels + attractions + transfers + restaurants
+    activities = counts.get("activities", 0)
+    cruises = counts.get("cruises", 0)
+    total = activities + cruises
 
-    last_run_data = last_ingestion_map.get(dest.id)
-    last_ingestion_run = None
+    last_run_data = last_scrape_map.get(dest.id)
+    last_scrape_run = None
     if last_run_data:
-        last_ingestion_run = LastIngestionRunBrief(**last_run_data)
+        last_scrape_run = LastScrapeRunBrief(**last_run_data)
 
     return DestinationListItem(
         id=dest.id,
@@ -67,18 +65,16 @@ def _build_destination_list_item(
         latitude=float(dest.latitude) if dest.latitude is not None else None,
         longitude=float(dest.longitude) if dest.longitude is not None else None,
         status=dest.status,
-        enabled_categories=dest.enabled_categories or ["hotels", "attractions", "transfers", "restaurants"],
+        enabled_categories=dest.enabled_categories or ["activities", "cruises"],
         created_at=dest.created_at,
         updated_at=dest.updated_at,
         location_count=len(dest.locations) if dest.locations else 0,
         product_counts=ProductCountSummary(
-            hotels=hotels,
-            attractions=attractions,
-            transfers=transfers,
-            restaurants=restaurants,
+            activities=activities,
+            cruises=cruises,
             total=total,
         ),
-        last_ingestion_run=last_ingestion_run,
+        last_scrape_run=last_scrape_run,
     )
 
 
@@ -100,11 +96,11 @@ def _build_destination_detail(
         latitude=float(dest.latitude) if dest.latitude is not None else None,
         longitude=float(dest.longitude) if dest.longitude is not None else None,
         status=dest.status,
-        enabled_categories=dest.enabled_categories or ["hotels", "attractions", "transfers", "restaurants"],
+        enabled_categories=dest.enabled_categories or ["activities", "cruises"],
         created_at=dest.created_at,
         updated_at=dest.updated_at,
         locations=[LocationResponse.model_validate(loc) for loc in dest.locations],
-        recent_ingestion_jobs=[IngestionJobBrief.model_validate(j) for j in recent_jobs],
+        recent_scrape_jobs=[ScrapeJobBrief.model_validate(j) for j in recent_jobs],
         pipeline_status=[CategoryPipelineStatus(**p) for p in pipeline],
     )
 
@@ -144,7 +140,7 @@ async def list_destinations(
     page: int = Query(1, ge=1),
     per_page: int = Query(25, ge=1, le=100),
 ):
-    destinations, total, product_counts_map, last_ingestion_map = (
+    destinations, total, product_counts_map, last_scrape_map = (
         await destination_service.list_destinations(
             db, search, status, country_code, page, per_page,
         )
@@ -152,7 +148,7 @@ async def list_destinations(
     total_pages = (total + per_page - 1) // per_page if per_page > 0 else 0
     return PaginatedResponse(
         items=[
-            _build_destination_list_item(d, product_counts_map, last_ingestion_map)
+            _build_destination_list_item(d, product_counts_map, last_scrape_map)
             for d in destinations
         ],
         total=total,
@@ -170,7 +166,7 @@ async def create_destination(
 ):
     data = body.model_dump(exclude_unset=True)
     dest = await destination_service.create_destination(db, data, current_user.id)
-    recent_jobs = await destination_service.get_recent_ingestion_jobs(db, dest.id)
+    recent_jobs = await destination_service.get_recent_scrape_jobs(db, dest.id)
     pipeline = await destination_service.get_pipeline_status(db, dest.id)
     return _build_destination_detail(dest, recent_jobs, pipeline)
 
@@ -184,7 +180,7 @@ async def get_destination(
     dest = await destination_service.get_destination_by_id(db, destination_id)
     if not dest:
         raise NotFoundError("Destination not found")
-    recent_jobs = await destination_service.get_recent_ingestion_jobs(db, destination_id)
+    recent_jobs = await destination_service.get_recent_scrape_jobs(db, destination_id)
     pipeline = await destination_service.get_pipeline_status(db, destination_id)
     return _build_destination_detail(dest, recent_jobs, pipeline)
 
@@ -198,7 +194,7 @@ async def update_destination(
 ):
     data = body.model_dump(exclude_unset=True)
     dest = await destination_service.update_destination(db, destination_id, data, current_user.id)
-    recent_jobs = await destination_service.get_recent_ingestion_jobs(db, dest.id)
+    recent_jobs = await destination_service.get_recent_scrape_jobs(db, dest.id)
     pipeline = await destination_service.get_pipeline_status(db, dest.id)
     return _build_destination_detail(dest, recent_jobs, pipeline)
 
@@ -213,7 +209,7 @@ async def update_destination_status(
     dest = await destination_service.update_destination_status(
         db, destination_id, body.status, current_user.id,
     )
-    recent_jobs = await destination_service.get_recent_ingestion_jobs(db, dest.id)
+    recent_jobs = await destination_service.get_recent_scrape_jobs(db, dest.id)
     pipeline = await destination_service.get_pipeline_status(db, dest.id)
     return _build_destination_detail(dest, recent_jobs, pipeline)
 

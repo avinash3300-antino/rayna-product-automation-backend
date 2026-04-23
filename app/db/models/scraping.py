@@ -32,6 +32,9 @@ class SourceDiscoveryRun(Base):
         nullable=False,
     )
     category: Mapped[str] = mapped_column(String(100), nullable=False)
+    product_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="'activities'"
+    )
     status: Mapped[str] = mapped_column(
         String(50), nullable=False, server_default="pending"
     )
@@ -81,6 +84,9 @@ class ScrapeSource(Base):
         nullable=False,
     )
     category: Mapped[str] = mapped_column(String(100), nullable=False)
+    product_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="'activities'"
+    )
     source_name: Mapped[str] = mapped_column(String(300), nullable=False)
     source_url: Mapped[str] = mapped_column(String(500), nullable=False)
     tier: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -137,6 +143,9 @@ class ScrapeJob(Base):
         nullable=False,
     )
     category: Mapped[str] = mapped_column(String(100), nullable=False)
+    product_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="'activities'"
+    )
     status: Mapped[str] = mapped_column(
         String(50), nullable=False, server_default="pending"
     )

@@ -1,3 +1,5 @@
+"""Dedup service — product-type-aware MD5 + pgvector semantic dedup."""
+
 import hashlib
 import json
 import logging
@@ -6,18 +8,26 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.activities import Activity, ActivityEmbedding
+from app.db.models.activities import Activity
+from app.db.models.cruises import CruiseProduct
+from app.db.models.reviews import ProductEmbedding
 from app.integrations.claude_client import claude_client
 
 logger = logging.getLogger(__name__)
 
+# Maps product_type string → SQLAlchemy model class
+MODEL_REGISTRY: dict[str, type] = {
+    "activities": Activity,
+    "cruises": CruiseProduct,
+}
+
 MERGE_SYSTEM_PROMPT = """You are a travel content writer for Rayna Tours.
-You receive MULTIPLE scraped descriptions of the SAME activity from different sources.
+You receive MULTIPLE scraped descriptions of the SAME product from different sources.
 Your job is to write ONE ORIGINAL version that captures the best information from each source,
 WITHOUT copying any phrasing verbatim.
 
 RULES:
-1. Read all source versions to understand the activity fully.
+1. Read all source versions to understand the product fully.
 2. Extract KEY FACTS from each source (features, logistics, inclusions, etc.).
 3. Write COMPLETELY ORIGINAL prose — new sentences, new structure, new phrasing.
 4. If one source has richer detail on a topic, use those FACTS but rewrite them.
@@ -34,6 +44,13 @@ Return ONLY valid JSON with these fields:
 Return null for any field you cannot determine. No markdown fences."""
 
 
+def _get_model(product_type: str):
+    model = MODEL_REGISTRY.get(product_type)
+    if model is None:
+        raise ValueError(f"Unknown product_type '{product_type}' for dedup")
+    return model
+
+
 def compute_dedupe_hash(name: str, city: str, category: str) -> str:
     """MD5 hash of normalized name+city+category for exact-match dedup."""
     normalized = (
@@ -46,10 +63,12 @@ def compute_dedupe_hash(name: str, city: str, category: str) -> str:
 async def find_exact_duplicate(
     db: AsyncSession,
     dedup_hash: str,
-) -> Activity | None:
-    """Find an existing activity with the same dedup hash."""
+    product_type: str = "activities",
+):
+    """Find an existing product with the same dedup hash."""
+    model = _get_model(product_type)
     result = await db.execute(
-        select(Activity).where(Activity.dedup_hash == dedup_hash)
+        select(model).where(model.dedup_hash == dedup_hash)
     )
     return result.scalar_one_or_none()
 
@@ -57,30 +76,47 @@ async def find_exact_duplicate(
 async def find_semantic_duplicate(
     db: AsyncSession,
     embedding: list[float],
+    product_type: str = "activities",
+    city_id: uuid.UUID | None = None,
     threshold: float = 0.92,
-) -> tuple[Activity | None, float]:
-    """Find semantically similar activity using pgvector cosine distance.
+):
+    """Find semantically similar product using pgvector cosine distance.
 
-    Returns (activity, similarity_score) or (None, 0.0).
+    Scoped to the same product_type and city to avoid false matches.
+    Returns (product, similarity_score) or (None, 0.0).
     """
-    result = await db.execute(
+    model = _get_model(product_type)
+
+    query = (
         select(
-            ActivityEmbedding.activity_id,
+            ProductEmbedding.product_id,
             (
-                1 - ActivityEmbedding.embedding.cosine_distance(embedding)
+                1 - ProductEmbedding.embedding.cosine_distance(embedding)
             ).label("similarity"),
         )
-        .order_by(ActivityEmbedding.embedding.cosine_distance(embedding))
+        .where(ProductEmbedding.product_type == product_type)
+    )
+
+    if city_id:
+        query = query.join(model, model.id == ProductEmbedding.product_id).where(
+            model.city_id == city_id
+        )
+
+    query = (
+        query
+        .order_by(ProductEmbedding.embedding.cosine_distance(embedding))
         .limit(1)
     )
+
+    result = await db.execute(query)
     row = result.first()
     if row is None:
         return None, 0.0
 
     similarity = float(row.similarity)
     if similarity >= threshold:
-        activity = await db.get(Activity, row.activity_id)
-        return activity, similarity
+        product = await db.get(model, row.product_id)
+        return product, similarity
 
     return None, similarity
 
@@ -91,15 +127,17 @@ async def check_duplicate(
     city: str,
     category: str,
     description: str,
+    product_type: str = "activities",
     embedding: list[float] | None = None,
+    city_id: uuid.UUID | None = None,
 ) -> dict:
-    """Check if an activity is a duplicate.
+    """Check if a product is a duplicate.
 
     Returns {is_duplicate: bool, match_type: str|None, existing_id: UUID|None}.
     """
     # Layer 1: MD5 hash check
     dedup_hash = compute_dedupe_hash(name, city, category)
-    exact = await find_exact_duplicate(db, dedup_hash)
+    exact = await find_exact_duplicate(db, dedup_hash, product_type=product_type)
     if exact:
         return {
             "is_duplicate": True,
@@ -110,7 +148,8 @@ async def check_duplicate(
     # Layer 2: Semantic similarity (only if embedding provided)
     if embedding:
         semantic_match, score = await find_semantic_duplicate(
-            db, embedding, threshold=0.92
+            db, embedding, product_type=product_type,
+            city_id=city_id, threshold=0.92,
         )
         if semantic_match:
             return {
@@ -134,25 +173,21 @@ async def get_embedding(text: str) -> list[float]:
     client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     response = await client.embeddings.create(
         model="text-embedding-3-small",
-        input=text[:8000],  # Truncate to avoid token limits
+        input=text[:8000],
     )
     return response.data[0].embedding
 
 
 async def _claude_merge_content(
-    existing: Activity,
+    existing,
     new_data: dict,
 ) -> dict | None:
-    """Use Claude to synthesize original content from multiple source versions.
-
-    Returns dict with merged content fields, or None on failure.
-    """
+    """Use Claude to synthesize original content from multiple source versions."""
     content_fields = [
         "description_short", "description_long",
         "highlights", "included", "excluded",
     ]
 
-    # Collect source versions
     source_a = {}
     source_b = {}
     has_content_to_merge = False
@@ -170,9 +205,9 @@ async def _claude_merge_content(
     if not has_content_to_merge:
         return None
 
-    prompt = f"""Activity: {existing.name}
+    prompt = f"""Product: {existing.name}
 City: {existing.city}
-Category: {existing.category}
+Category: {getattr(existing, 'category', 'N/A')}
 
 ═══ SOURCE A (existing record) ═══
 Short description: {source_a.get('description_short', 'N/A')}
@@ -216,17 +251,18 @@ async def merge_or_save(
     new_data: dict,
     existing_id: uuid.UUID | None,
     match_type: str | None,
-) -> Activity:
-    """Merge with existing or save new activity.
+    product_type: str = "activities",
+):
+    """Merge with existing or save new product.
 
-    If semantic near-duplicate: use Claude to synthesize original content
-    from both source versions. Non-content fields use best-data-wins logic.
-    If new: insert fresh record.
+    If semantic near-duplicate: use Claude to synthesize original content.
+    Non-content fields use best-data-wins logic.
     """
+    model = _get_model(product_type)
+
     if existing_id and match_type == "semantic":
-        existing = await db.get(Activity, existing_id)
+        existing = await db.get(model, existing_id)
         if existing:
-            # ── Claude-based content merge ──────────────────────────
             merged = await _claude_merge_content(existing, new_data)
             if merged:
                 content_fields = [
@@ -237,18 +273,25 @@ async def merge_or_save(
                     value = merged.get(field)
                     if value is not None and hasattr(existing, field):
                         setattr(existing, field, value)
-                # Reset status so enrichment re-runs on merged content
                 existing.status = "draft"
                 logger.info(
-                    "Claude-merged content for activity %s from new source",
-                    existing.id,
+                    "Claude-merged content for %s %s from new source",
+                    product_type, existing.id,
                 )
 
-            # ── Non-content fields: best data wins ──────────────────
+            # Track all source URLs
+            new_source_url = new_data.get("source_url")
+            if new_source_url and hasattr(existing, "source_urls"):
+                current_urls = existing.source_urls or [existing.source_url]
+                if new_source_url not in current_urls:
+                    existing.source_urls = current_urls + [new_source_url]
+
+            # Non-content fields: best data wins
             skip_fields = {
                 "description_short", "description_long",
                 "highlights", "included", "excluded",
                 "id", "created_at", "updated_at", "status",
+                "source_urls",
             }
             for field, new_val in new_data.items():
                 if field in skip_fields:
@@ -261,11 +304,9 @@ async def merge_or_save(
                 if old_val is None:
                     setattr(existing, field, new_val)
                     continue
-                # Keep higher review count
                 if field == "review_count":
                     if (new_val or 0) > (old_val or 0):
                         setattr(existing, field, new_val)
-                # Keep more gallery images
                 elif field == "gallery_json":
                     if isinstance(new_val, list) and isinstance(old_val, list):
                         if len(new_val) > len(old_val):
@@ -274,26 +315,26 @@ async def merge_or_save(
             await db.flush()
             return existing
 
-    # Create new activity
-    activity = Activity(**new_data)
-    db.add(activity)
+    # Create new product
+    product = model(**new_data)
+    db.add(product)
     await db.flush()
 
     # Compute and store embedding
     try:
         text_for_embed = f"{new_data.get('name', '')}. {new_data.get('description_short', '')}"
         embedding = await get_embedding(text_for_embed)
-        emb = ActivityEmbedding(
-            activity_id=activity.id,
+        emb = ProductEmbedding(
+            product_type=product_type,
+            product_id=product.id,
             embedding=embedding,
         )
         db.add(emb)
         await db.flush()
     except Exception as exc:
         logger.warning(
-            "Failed to compute embedding for activity %s: %s",
-            activity.id,
-            exc,
+            "Failed to compute embedding for %s %s: %s",
+            product_type, product.id, exc,
         )
 
-    return activity
+    return product

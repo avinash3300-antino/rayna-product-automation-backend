@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from uuid import UUID
 
@@ -12,7 +13,8 @@ from app.db.models.scraping import ScrapeJob
 from app.schemas.destinations import PaginatedResponse
 from app.schemas.scraping import ScrapeJobResponse, ScrapeJobTriggerRequest
 from app.services.pipeline_service import (
-    run_pipeline_for_discovery,
+    create_pending_jobs,
+    process_pending_jobs,
     run_post_enrichment_for_city,
 )
 
@@ -28,13 +30,33 @@ async def trigger_scraping_pipeline(
     db: AsyncSession = Depends(get_db),
     current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
 ):
-    """Trigger the scraping pipeline for approved sources in a discovery run."""
-    jobs = await run_pipeline_for_discovery(
+    """Create pending scrape jobs and start background processing.
+
+    Returns immediately with pending jobs. The frontend polls each job's
+    status via GET /scraping/jobs/{id} to track real-time progress.
+    """
+    # Step 1: Create pending jobs (fast, committed immediately)
+    jobs = await create_pending_jobs(
         db,
         discovery_run_id=body.discovery_run_id,
         category=body.category,
+        product_type=body.product_type,
         triggered_by=current_user.id,
     )
+
+    # Step 2: Extract (job_id, source_id) tuples for background task
+    job_source_pairs = [(j.id, j.source_id) for j in jobs]
+
+    # Step 3: Fire and forget — process in background
+    asyncio.create_task(
+        process_pending_jobs(
+            job_source_pairs,
+            product_type=body.product_type,
+            triggered_by=current_user.id,
+        )
+    )
+
+    # Step 4: Return pending jobs immediately
     return [ScrapeJobResponse.model_validate(j) for j in jobs]
 
 
@@ -44,6 +66,7 @@ async def list_scrape_jobs(
     db: AsyncSession = Depends(get_db),
     city_id: UUID | None = Query(None),
     category: str | None = Query(None),
+    product_type: str | None = Query(None),
     status: str | None = Query(None),
     page: int = Query(1, ge=1),
     per_page: int = Query(25, ge=1, le=100),
@@ -58,6 +81,9 @@ async def list_scrape_jobs(
     if category:
         query = query.where(ScrapeJob.category == category)
         count_query = count_query.where(ScrapeJob.category == category)
+    if product_type:
+        query = query.where(ScrapeJob.product_type == product_type)
+        count_query = count_query.where(ScrapeJob.product_type == product_type)
     if status:
         query = query.where(ScrapeJob.status == status)
         count_query = count_query.where(ScrapeJob.status == status)
@@ -84,11 +110,12 @@ async def list_scrape_jobs(
 @router.post("/post-enrich/{city_id}")
 async def trigger_post_enrichment(
     city_id: UUID,
+    product_type: str = Query("activities"),
     db: AsyncSession = Depends(get_db),
     current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
 ):
-    """Run gallery images, geocoding, and reviews for all activities in a city."""
-    result = await run_post_enrichment_for_city(db, city_id)
+    """Run gallery images, geocoding, and reviews for all products in a city."""
+    result = await run_post_enrichment_for_city(db, city_id, product_type=product_type)
     return result
 
 

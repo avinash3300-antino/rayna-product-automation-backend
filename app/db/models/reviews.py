@@ -1,10 +1,15 @@
 import uuid
 from datetime import datetime
 
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:
+    Vector = None
 from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -13,24 +18,25 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models import Base
 
 
-class ActivityReview(Base):
-    __tablename__ = "activity_reviews"
+class ProductReview(Base):
+    """Shared reviews table for all product types (activities, cruises, yachts, etc.)."""
+    __tablename__ = "product_reviews"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    activity_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("activities.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
+    product_type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # "activities", "cruises", "yachts", etc.
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
     )
 
     # ── Review Content ───────────────────────────────────────────────────
@@ -60,5 +66,35 @@ class ActivityReview(Base):
         server_default=func.now(),
     )
 
-    # ── Relationships ────────────────────────────────────────────────────
-    activity = relationship("Activity", foreign_keys=[activity_id])
+    __table_args__ = (
+        Index("ix_product_reviews_type_id", "product_type", "product_id"),
+    )
+
+
+class ProductEmbedding(Base):
+    """Shared embeddings table for semantic dedup across all product types."""
+    __tablename__ = "product_embeddings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    product_type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    embedding = mapped_column(
+        Vector(1536) if Vector else Text, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        Index("ix_product_embeddings_type_id", "product_type", "product_id", unique=True),
+    )

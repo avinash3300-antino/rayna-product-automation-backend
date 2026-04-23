@@ -1,16 +1,16 @@
 import logging
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import ConflictError, NotFoundError
+from app.db.models.activities import Activity
 from app.db.models.audit import AuditAuditLog
+from app.db.models.cruises import CruiseProduct
 from app.db.models.destinations import CatalogDestination, CatalogLocation
-from app.db.models.ingestion import IngestionJob
-from app.db.models.products import CatalogProduct
-from app.db.models.transfers import CatalogTransferProduct
+from app.db.models.scraping import ScrapeJob
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ async def list_destinations(
     page: int = 1,
     per_page: int = 25,
 ) -> tuple[list[CatalogDestination], int, dict, dict]:
-    """Returns (destinations, total, product_counts_map, last_ingestion_map)."""
+    """Returns (destinations, total, product_counts_map, last_scrape_map)."""
     query = select(CatalogDestination).options(
         selectinload(CatalogDestination.locations)
     )
@@ -130,75 +130,86 @@ async def list_destinations(
 
     dest_ids = [d.id for d in destinations]
     product_counts_map: dict = {}
-    last_ingestion_map: dict = {}
+    last_scrape_map: dict = {}
 
     if dest_ids:
-        # Batch fetch product counts per category
-        pc_result = await db.execute(
-            select(
-                CatalogProduct.destination_id,
-                CatalogProduct.category,
-                func.count(CatalogProduct.id),
-            )
-            .where(CatalogProduct.destination_id.in_(dest_ids))
-            .group_by(CatalogProduct.destination_id, CatalogProduct.category)
+        # Count activities per city
+        act_result = await db.execute(
+            select(Activity.city_id, func.count(Activity.id))
+            .where(Activity.city_id.in_(dest_ids))
+            .group_by(Activity.city_id)
         )
-        for dest_id, category, cnt in pc_result.all():
-            product_counts_map.setdefault(dest_id, {})[category] = cnt
+        for dest_id, cnt in act_result.all():
+            product_counts_map.setdefault(dest_id, {})["activities"] = cnt
 
-        # Batch fetch last ingestion run details per destination
+        # Count cruises per city
+        cr_result = await db.execute(
+            select(CruiseProduct.city_id, func.count(CruiseProduct.id))
+            .where(CruiseProduct.city_id.in_(dest_ids))
+            .group_by(CruiseProduct.city_id)
+        )
+        for dest_id, cnt in cr_result.all():
+            product_counts_map.setdefault(dest_id, {})["cruises"] = cnt
+
+        # Last scrape job per destination (via ScrapeJob → ScrapeSource → city)
+        from app.db.models.scraping import ScrapeSource
+
         ranked = (
             select(
-                IngestionJob.destination_id,
-                IngestionJob.status,
-                IngestionJob.created_at,
-                IngestionJob.started_at,
-                IngestionJob.completed_at,
-                IngestionJob.total_records_fetched,
+                ScrapeSource.city_id,
+                ScrapeJob.status,
+                ScrapeJob.created_at,
+                ScrapeJob.started_at,
+                ScrapeJob.completed_at,
+                ScrapeJob.records_found,
                 func.row_number()
                 .over(
-                    partition_by=IngestionJob.destination_id,
-                    order_by=IngestionJob.created_at.desc(),
+                    partition_by=ScrapeSource.city_id,
+                    order_by=ScrapeJob.created_at.desc(),
                 )
                 .label("rn"),
             )
-            .where(IngestionJob.destination_id.in_(dest_ids))
+            .join(ScrapeSource, ScrapeJob.source_id == ScrapeSource.id)
+            .where(ScrapeSource.city_id.in_(dest_ids))
             .subquery()
         )
-        li_result = await db.execute(
+        sj_result = await db.execute(
             select(
-                ranked.c.destination_id,
+                ranked.c.city_id,
                 ranked.c.status,
                 ranked.c.created_at,
                 ranked.c.started_at,
                 ranked.c.completed_at,
-                ranked.c.total_records_fetched,
+                ranked.c.records_found,
             ).where(ranked.c.rn == 1)
         )
-        for row in li_result.all():
+        for row in sj_result.all():
             dest_id, status_val, created_at, started_at, completed_at, records = row
             duration_ms = 0
             if started_at and completed_at:
                 duration_ms = int((completed_at - started_at).total_seconds() * 1000)
-            last_ingestion_map[dest_id] = {
+            last_scrape_map[dest_id] = {
                 "date": created_at,
                 "status": status_val,
-                "records_processed": records or 0,
+                "records_found": records or 0,
                 "duration_ms": duration_ms,
             }
 
-    return destinations, total, product_counts_map, last_ingestion_map
+    return destinations, total, product_counts_map, last_scrape_map
 
 
-async def get_recent_ingestion_jobs(
+async def get_recent_scrape_jobs(
     db: AsyncSession,
     destination_id: uuid.UUID,
-    limit: int = 3,
-) -> list[IngestionJob]:
+    limit: int = 5,
+) -> list[ScrapeJob]:
+    from app.db.models.scraping import ScrapeSource
+
     result = await db.execute(
-        select(IngestionJob)
-        .where(IngestionJob.destination_id == destination_id)
-        .order_by(IngestionJob.created_at.desc())
+        select(ScrapeJob)
+        .join(ScrapeSource, ScrapeJob.source_id == ScrapeSource.id)
+        .where(ScrapeSource.city_id == destination_id)
+        .order_by(ScrapeJob.created_at.desc())
         .limit(limit)
     )
     return list(result.scalars().all())
@@ -208,34 +219,41 @@ async def get_pipeline_status(
     db: AsyncSession,
     destination_id: uuid.UUID,
 ) -> list[dict]:
-    result = await db.execute(
-        select(
-            CatalogProduct.category,
-            CatalogProduct.status,
-            func.count(CatalogProduct.id),
-        )
-        .where(CatalogProduct.destination_id == destination_id)
-        .group_by(CatalogProduct.category, CatalogProduct.status)
+    # Activities by status
+    act_result = await db.execute(
+        select(Activity.status, func.count(Activity.id))
+        .where(Activity.city_id == destination_id)
+        .group_by(Activity.status)
     )
+    act_status_map: dict[str, int] = {}
+    for status_val, cnt in act_result.all():
+        act_status_map[status_val] = cnt
 
-    category_map: dict = {}
-    for category, status, cnt in result.all():
-        category_map.setdefault(category, {})[status] = cnt
+    # Cruises by status
+    cr_result = await db.execute(
+        select(CruiseProduct.status, func.count(CruiseProduct.id))
+        .where(CruiseProduct.city_id == destination_id)
+        .group_by(CruiseProduct.status)
+    )
+    cr_status_map: dict[str, int] = {}
+    for status_val, cnt in cr_result.all():
+        cr_status_map[status_val] = cnt
 
     pipeline = []
-    for category, status_counts in category_map.items():
+    for product_type, status_counts in [("activities", act_status_map), ("cruises", cr_status_map)]:
         total = sum(status_counts.values())
-        pipeline.append(
-            {
-                "category": category,
-                "total": total,
-                "draft": status_counts.get("draft", 0),
-                "enriched": status_counts.get("enriched", 0),
-                "review_ready": status_counts.get("review_ready", 0),
-                "approved": status_counts.get("approved", 0),
-                "published": status_counts.get("published", 0),
-            }
-        )
+        if total > 0:
+            pipeline.append(
+                {
+                    "product_type": product_type,
+                    "total": total,
+                    "draft": status_counts.get("draft", 0),
+                    "enriched": status_counts.get("enriched", 0),
+                    "review_ready": status_counts.get("review_ready", 0),
+                    "approved": status_counts.get("approved", 0),
+                    "published": status_counts.get("published", 0),
+                }
+            )
     return pipeline
 
 
@@ -413,18 +431,6 @@ async def delete_location(
 ) -> None:
     loc = await _get_location(db, destination_id, location_id)
 
-    ref_count_result = await db.execute(
-        select(func.count(CatalogTransferProduct.product_id)).where(
-            (CatalogTransferProduct.origin_location_id == location_id)
-            | (CatalogTransferProduct.destination_location_id == location_id)
-        )
-    )
-    ref_count = ref_count_result.scalar_one()
-    if ref_count > 0:
-        raise ConflictError(
-            f"Cannot delete location: referenced by {ref_count} transfer product(s)"
-        )
-
     old_data = location_to_dict(loc)
     await db.delete(loc)
 
@@ -449,12 +455,13 @@ async def delete_destination(
         raise NotFoundError("Destination not found")
 
     # Block deletion if products are linked
-    product_count_result = await db.execute(
-        select(func.count(CatalogProduct.id)).where(
-            CatalogProduct.destination_id == destination_id
-        )
+    act_count_result = await db.execute(
+        select(func.count(Activity.id)).where(Activity.city_id == destination_id)
     )
-    product_count = product_count_result.scalar_one()
+    cr_count_result = await db.execute(
+        select(func.count(CruiseProduct.id)).where(CruiseProduct.city_id == destination_id)
+    )
+    product_count = act_count_result.scalar_one() + cr_count_result.scalar_one()
     if product_count > 0:
         raise ConflictError(
             f"Cannot delete destination: {product_count} product(s) are linked to it"
@@ -489,39 +496,43 @@ async def get_stats_overview(db: AsyncSession) -> dict:
     )
     total_dest, active_dest = dest_result.one()
 
-    # Products by category
-    prod_result = await db.execute(
-        select(CatalogProduct.category, func.count(CatalogProduct.id))
-        .group_by(CatalogProduct.category)
-    )
-    products_by_cat: dict = {}
-    total_products = 0
-    for category, cnt in prod_result.all():
-        products_by_cat[category] = cnt
-        total_products += cnt
+    # Product counts
+    act_result = await db.execute(select(func.count(Activity.id)))
+    activities_count = act_result.scalar_one()
 
-    # Published and in-pipeline counts
-    pub_result = await db.execute(
-        select(func.count(CatalogProduct.id)).where(CatalogProduct.publish_flag.is_(True))
-    )
-    products_published = pub_result.scalar_one()
+    cr_result = await db.execute(select(func.count(CruiseProduct.id)))
+    cruises_count = cr_result.scalar_one()
 
-    pipeline_result = await db.execute(
-        select(func.count(CatalogProduct.id)).where(
-            CatalogProduct.publish_flag.is_(False),
-            CatalogProduct.status != "draft",
+    total_products = activities_count + cruises_count
+
+    # Published counts
+    pub_act = await db.execute(
+        select(func.count(Activity.id)).where(Activity.status == "published")
+    )
+    pub_cr = await db.execute(
+        select(func.count(CruiseProduct.id)).where(CruiseProduct.status == "published")
+    )
+    products_published = pub_act.scalar_one() + pub_cr.scalar_one()
+
+    # In-pipeline counts (not draft, not published)
+    pipe_act = await db.execute(
+        select(func.count(Activity.id)).where(
+            Activity.status.notin_(["draft", "published"])
         )
     )
-    products_in_pipeline = pipeline_result.scalar_one()
+    pipe_cr = await db.execute(
+        select(func.count(CruiseProduct.id)).where(
+            CruiseProduct.status.notin_(["draft", "published"])
+        )
+    )
+    products_in_pipeline = pipe_act.scalar_one() + pipe_cr.scalar_one()
 
     return {
         "total_destinations": total_dest,
         "active_destinations": active_dest,
         "total_products": {
-            "hotels": products_by_cat.get("hotels", 0),
-            "attractions": products_by_cat.get("attractions", 0),
-            "transfers": products_by_cat.get("transfers", 0),
-            "restaurants": products_by_cat.get("restaurants", 0),
+            "activities": activities_count,
+            "cruises": cruises_count,
             "total": total_products,
         },
         "products_published": products_published,

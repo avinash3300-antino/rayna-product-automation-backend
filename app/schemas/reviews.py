@@ -6,7 +6,8 @@ from pydantic import BaseModel
 
 class ReviewResponse(BaseModel):
     id: UUID
-    activity_id: UUID
+    product_type: str
+    product_id: UUID
     reviewer_name: str
     reviewer_avatar_url: str | None = None
     rating: float | None = None
@@ -23,7 +24,8 @@ class ReviewResponse(BaseModel):
 
 
 class ReviewListResponse(BaseModel):
-    activity_id: UUID
+    product_id: UUID
+    product_type: str = "activities"
     total: int
     avg_rating: float | None = None
     platform_counts: dict[str, int] = {}

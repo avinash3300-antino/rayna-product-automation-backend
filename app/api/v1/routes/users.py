@@ -24,7 +24,7 @@ from app.schemas.users import (
     UserResponse,
     UserUpdate,
 )
-from app.services import cloudinary_service, user_service
+from app.services import s3_service, user_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
@@ -143,7 +143,7 @@ async def upload_profile_picture(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        url = await cloudinary_service.upload_profile_picture(file, str(current_user.id))
+        url = await s3_service.upload_profile_picture(file, str(current_user.id))
     except ValueError as e:
         raise BadRequestError(str(e))
 
@@ -169,7 +169,7 @@ async def delete_profile_picture(
         raise BadRequestError("No profile picture to delete")
 
     old_data = user_service.user_to_dict(current_user)
-    await cloudinary_service.delete_profile_picture(str(current_user.id))
+    await s3_service.delete_profile_picture(str(current_user.id))
     current_user.profile_picture_url = None
 
     await user_service.write_audit(

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 SYNTHESIS_SYSTEM_PROMPT = """You are a travel data source analyst.
 Given a list of search results for a travel category in a city, identify the BEST
-websites to scrape for structured activity/tour data.
+websites to scrape for structured product data.
 
 Return a JSON array of sources, each with:
 - source_name (string, e.g. "GetYourGuide Dubai")
@@ -32,6 +32,116 @@ Rules:
 - Include 2-3 local/niche sites as tier 2.
 - Exclude social media, forums, or generic travel blogs.
 - Return ONLY valid JSON array, no markdown fences."""
+
+# Category-specific search query templates
+SEARCH_QUERIES = {
+    "activities": [
+        "best {category} in {city} {country} book online",
+        "{category} {city} tickets prices tours",
+        "top {category} experiences {city} {country} 2025",
+        "{category} {city} viator getyourguide klook",
+    ],
+    "cruises": [
+        "best {category} cruises in {city} {country}",
+        "{category} boat tours {city} book online",
+        "top {category} cruise experiences {city} tickets prices",
+        "{category} dinner cruise yacht {city}",
+    ],
+}
+
+# Category-specific query overrides for more targeted searches
+CATEGORY_QUERY_OVERRIDES: dict[str, list[str]] = {
+    "Sightseeing Tours": [
+        "hop on hop off bus tour {city} tickets book online",
+        "best sightseeing tours {city} walking tour open top bus",
+        "{city} city tour book online viator getyourguide",
+        "top rated sightseeing experiences {city} {country}",
+    ],
+    "Landmark Tickets": [
+        "best landmarks {city} tickets book online skip the line",
+        "{city} attraction tickets prices entry",
+        "top landmarks to visit {city} {country} book tickets",
+        "{city} famous monuments entrance tickets viator",
+    ],
+    "Museum & Gallery": [
+        "best museum tours {city} guided tour tickets",
+        "{city} art gallery museum skip the line book online",
+        "top museums {city} {country} guided experience",
+        "{city} museum tickets viator getyourguide",
+    ],
+    "Thames River": [
+        "Thames river cruise {city} tickets book online",
+        "{city} river boat tour dinner cruise speedboat",
+        "best Thames cruise experiences {city} afternoon tea",
+        "Thames sightseeing cruise {city} viator tickets",
+    ],
+    "Day Trips": [
+        "best day trips from {city} book online tours",
+        "{city} day trip stonehenge bath windsor oxford",
+        "top day tours from {city} {country} viator getyourguide",
+        "day excursions from {city} prices book online",
+    ],
+    "Harry Potter & Film": [
+        "Harry Potter studio tour {city} tickets book online",
+        "{city} harry potter walking tour filming locations",
+        "Warner Bros Studio Tour {city} tickets prices",
+        "{city} film location tours book online viator",
+    ],
+    "Food & Drink": [
+        "best food tours {city} walking tour book online",
+        "{city} pub crawl food experience afternoon tea tasting",
+        "top food and drink experiences {city} {country}",
+        "{city} cooking class market tour viator getyourguide",
+    ],
+    "Shows & Entertainment": [
+        "West End theatre tickets {city} book online",
+        "{city} shows entertainment comedy cabaret tickets",
+        "best theatre experiences {city} {country} tickets",
+        "{city} dinner show entertainment viator tickets",
+    ],
+    "Passes & Combos": [
+        "{city} Pass all inclusive attractions book online",
+        "Go City Explorer Pass {city} prices attractions",
+        "{city} multi attraction pass bundle tickets",
+        "best sightseeing pass {city} {country} save money",
+    ],
+    "Transfers": [
+        "{city} airport transfer book online private shared",
+        "Heathrow Gatwick {city} transfer shuttle taxi prices",
+        "{city} airport to city center transfer viator",
+        "private transfer {city} airport book online",
+    ],
+    "Sports & Outdoor": [
+        "best stadium tours {city} book online tickets",
+        "{city} outdoor activities cycling kayaking climbing",
+        "top sports experiences {city} {country} book online",
+        "{city} stadium tour football viator getyourguide",
+    ],
+    "Night Tours": [
+        "best night tours {city} ghost tour jack the ripper",
+        "{city} evening tour haunted walks night bus",
+        "top night experiences {city} {country} book online",
+        "{city} ghost tour night sightseeing viator",
+    ],
+    "Family & Kids": [
+        "best family activities {city} kids children book online",
+        "{city} family attractions zoo aquarium kids experiences",
+        "top family friendly tours {city} {country}",
+        "{city} kids activities viator family tours",
+    ],
+    "Luxury & Private": [
+        "luxury private tours {city} book online VIP",
+        "{city} private car tour helicopter ride exclusive",
+        "best luxury experiences {city} {country} premium",
+        "{city} VIP tour private guide viator",
+    ],
+    "Seasonal & Events": [
+        "{city} seasonal events experiences book online",
+        "Christmas markets {city} seasonal tours activities",
+        "{city} special events festivals tours tickets",
+        "best seasonal experiences {city} {country}",
+    ],
+}
 
 
 async def _write_audit(
@@ -59,6 +169,7 @@ async def run_discovery(
     db: AsyncSession,
     city_id: uuid.UUID,
     category: str,
+    product_type: str = "activities",
     triggered_by: uuid.UUID | None = None,
 ) -> SourceDiscoveryRun:
     """Run source discovery for a city + category.
@@ -81,6 +192,7 @@ async def run_discovery(
     run = SourceDiscoveryRun(
         city_id=city_id,
         category=category,
+        product_type=product_type,
         status="running",
         triggered_by=triggered_by,
         started_at=datetime.now(timezone.utc),
@@ -90,10 +202,14 @@ async def run_discovery(
 
     try:
         # ── Step 1: SearchAPI queries ────────────────────────────────
+        # Use category-specific overrides if available, else generic
+        if category in CATEGORY_QUERY_OVERRIDES:
+            templates = CATEGORY_QUERY_OVERRIDES[category]
+        else:
+            templates = SEARCH_QUERIES.get(product_type, SEARCH_QUERIES["activities"])
         queries = [
-            f"best {category} tours in {city_name} {country_name}",
-            f"{category} activities {city_name} book online",
-            f"top {category} experiences {city_name} tickets",
+            t.format(category=category, city=city_name, country=country_name)
+            for t in templates
         ]
 
         all_search_results = []
@@ -115,6 +231,7 @@ async def run_discovery(
             run.error_message = "No search results found"
             run.completed_at = datetime.now(timezone.utc)
             await db.flush()
+            await db.commit()
             return run
 
         # ── Step 2: Claude synthesis ─────────────────────────────────
@@ -179,6 +296,7 @@ Analyze these results and identify the best websites to scrape for
             source = ScrapeSource(
                 city_id=city_id,
                 category=category,
+                product_type=product_type,
                 source_name=source_name,
                 source_url=source_url,
                 tier=src.get("tier", 2),
@@ -274,6 +392,7 @@ async def add_manual_source(
     source_name: str,
     tier: int,
     actor_id: uuid.UUID,
+    product_type: str = "activities",
     discovery_run_id: uuid.UUID | None = None,
 ) -> ScrapeSource:
     """Manually add a scrape source."""
@@ -284,6 +403,7 @@ async def add_manual_source(
     source = ScrapeSource(
         city_id=city_id,
         category=category,
+        product_type=product_type,
         source_name=source_name,
         source_url=source_url,
         tier=tier,
@@ -307,3 +427,56 @@ async def add_manual_source(
     )
     await db.commit()
     return source
+
+
+# ── Source URL backfill ─────────────────────────────────────────────────
+
+TRUSTED_DOMAINS = [
+    "viator.com", "getyourguide.com", "klook.com", "tripadvisor.com",
+    "tiqets.com", "musement.com", "headout.com", "civitatis.com",
+    "expedia.com", "booking.com", "tourscanner.com", "timeout.com",
+    "visitlondon.com", "londonpass.com", "attractiontickets.com",
+    "ticketmaster.co.uk", "seetickets.com", "lastminute.com",
+    "goldentours.com", "bigbustours.com",
+]
+
+
+async def discover_additional_source_urls(
+    activity_name: str,
+    activity_city: str,
+    existing_urls: list[str] | None = None,
+    max_new: int = 2,
+) -> list[str]:
+    """Search for additional booking/travel URLs for an activity.
+
+    Returns up to `max_new` new URLs not already in existing_urls.
+    """
+    existing = set(existing_urls or [])
+    query = f'"{activity_name}" {activity_city} book online tickets'
+
+    try:
+        results = await searchapi_client.search(query, num_results=15)
+    except Exception as exc:
+        logger.warning("Source URL search failed for '%s': %s", activity_name, exc)
+        return []
+
+    new_urls: list[str] = []
+    for r in results:
+        url = (r.get("url") or "").strip()
+        if not url:
+            continue
+        # Must be from a trusted travel/booking domain
+        if not any(domain in url.lower() for domain in TRUSTED_DOMAINS):
+            continue
+        # Not already known
+        if url in existing:
+            continue
+        # Avoid search/category pages — prefer detail pages
+        if any(skip in url.lower() for skip in ["/search?", "/s?", "/category/"]):
+            continue
+        new_urls.append(url)
+        existing.add(url)
+        if len(new_urls) >= max_new:
+            break
+
+    return new_urls

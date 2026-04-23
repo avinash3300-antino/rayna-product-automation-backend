@@ -55,20 +55,17 @@ class LocationUpdate(BaseModel):
 
 
 class ProductCountSummary(BaseModel):
-    hotels: int = 0
-    attractions: int = 0
-    transfers: int = 0
-    restaurants: int = 0
+    activities: int = 0
+    cruises: int = 0
     total: int = 0
 
 
-class IngestionJobBrief(BaseModel):
+class ScrapeJobBrief(BaseModel):
     id: UUID
     status: str
-    run_type: str
-    trigger_type: str
-    total_records_fetched: int | None = None
-    total_errors: int | None = None
+    product_type: str = "activities"
+    records_found: int | None = None
+    records_saved: int | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime
@@ -76,15 +73,15 @@ class IngestionJobBrief(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class LastIngestionRunBrief(BaseModel):
+class LastScrapeRunBrief(BaseModel):
     date: datetime | None = None
     status: str
-    records_processed: int = 0
+    records_found: int = 0
     duration_ms: int = 0
 
 
 class CategoryPipelineStatus(BaseModel):
-    category: str
+    product_type: str
     total: int = 0
     draft: int = 0
     enriched: int = 0
@@ -111,12 +108,12 @@ class DestinationListItem(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     status: str
-    enabled_categories: list[str] = ["hotels", "attractions", "transfers", "restaurants"]
+    enabled_categories: list[str] = ["activities", "cruises"]
     created_at: datetime
     updated_at: datetime
     location_count: int = 0
     product_counts: ProductCountSummary = ProductCountSummary()
-    last_ingestion_run: LastIngestionRunBrief | None = None
+    last_scrape_run: LastScrapeRunBrief | None = None
 
 
 class DestinationDetail(BaseModel):
@@ -132,11 +129,11 @@ class DestinationDetail(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     status: str
-    enabled_categories: list[str] = ["hotels", "attractions", "transfers", "restaurants"]
+    enabled_categories: list[str] = ["activities", "cruises"]
     created_at: datetime
     updated_at: datetime
     locations: list[LocationResponse] = []
-    recent_ingestion_jobs: list[IngestionJobBrief] = []
+    recent_scrape_jobs: list[ScrapeJobBrief] = []
     pipeline_status: list[CategoryPipelineStatus] = []
 
 

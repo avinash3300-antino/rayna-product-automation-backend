@@ -8,16 +8,22 @@ logger = logging.getLogger(__name__)
 
 
 @celery.task(bind=True, max_retries=2, default_retry_delay=120)
-def run_pipeline_task(self, source_id: str, triggered_by: str | None = None):
+def run_pipeline_task(
+    self,
+    source_id: str,
+    product_type: str = "activities",
+    triggered_by: str | None = None,
+):
     """Celery task to run the full scraping pipeline for a source."""
     import uuid
-    from app.services.pipeline_service import run_activity_pipeline
+    from app.services.pipeline_service import run_product_pipeline
 
     async def _run():
         async with async_session_factory() as db:
-            return await run_activity_pipeline(
+            return await run_product_pipeline(
                 db,
                 source_id=uuid.UUID(source_id),
+                product_type=product_type,
                 triggered_by=uuid.UUID(triggered_by) if triggered_by else None,
             )
 
@@ -26,6 +32,7 @@ def run_pipeline_task(self, source_id: str, triggered_by: str | None = None):
         return {
             "job_id": str(result.id),
             "status": result.status,
+            "product_type": product_type,
             "records_found": result.records_found,
             "records_saved": result.records_saved,
             "records_enriched": result.records_enriched,
@@ -36,31 +43,45 @@ def run_pipeline_task(self, source_id: str, triggered_by: str | None = None):
 
 
 @celery.task(bind=True, max_retries=2, default_retry_delay=60)
-def enrich_activity_task(self, activity_id: str):
-    """Celery task to enrich a single activity."""
+def enrich_product_task(
+    self,
+    product_id: str,
+    product_type: str = "activities",
+):
+    """Celery task to enrich a single product."""
     import uuid
-    from app.services.enrichment_service import enrich_activity
+    from app.services.pipelines import get_pipeline
 
     async def _run():
+        pipeline = get_pipeline(product_type)
+
+        if product_type == "cruises":
+            from app.db.models.cruises import CruiseProduct as Model
+        else:
+            from app.db.models.activities import Activity as Model
+
         async with async_session_factory() as db:
-            from app.db.models.activities import Activity
+            product = await db.get(Model, uuid.UUID(product_id))
+            if not product:
+                return {"error": f"{product_type} product not found"}
 
-            activity = await db.get(Activity, uuid.UUID(activity_id))
-            if not activity:
-                return {"error": "Activity not found"}
-
-            enriched = await enrich_activity(db, activity)
+            await pipeline.enrich_product(db, product)
             await db.commit()
             return {
-                "activity_id": str(enriched.id),
-                "quality_score": enriched.quality_score,
+                "product_id": str(product.id),
+                "product_type": product_type,
+                "quality_score": product.quality_score,
             }
 
     try:
         return asyncio.run(_run())
     except Exception as exc:
-        logger.error("Enrich task failed for activity %s: %s", activity_id, exc)
+        logger.error("Enrich task failed for %s %s: %s", product_type, product_id, exc)
         raise self.retry(exc=exc)
+
+
+# Legacy alias
+enrich_activity_task = enrich_product_task
 
 
 @celery.task

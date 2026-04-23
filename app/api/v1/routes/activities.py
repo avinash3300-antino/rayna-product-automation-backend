@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import CurrentUser, get_db, require_role
 from app.core.exceptions import NotFoundError
@@ -27,6 +28,16 @@ router = APIRouter(prefix="/activities", tags=["activities"])
 
 MANAGER_ROLES = ("product_manager", "admin")
 ADMIN_ROLES = ("admin",)
+
+
+async def _get_activity_with_timeline(db: AsyncSession, activity_id: UUID) -> Activity | None:
+    """Fetch an activity with its timeline relationship eagerly loaded."""
+    result = await db.execute(
+        select(Activity)
+        .options(selectinload(Activity.timeline))
+        .where(Activity.id == activity_id)
+    )
+    return result.scalars().first()
 
 
 def _json_safe(data: dict | None) -> dict | None:
@@ -169,9 +180,11 @@ async def get_activity_by_slug(
 ):
     """Get activity by slug."""
     result = await db.execute(
-        select(Activity).where(Activity.slug == slug)
+        select(Activity)
+        .options(selectinload(Activity.timeline))
+        .where(Activity.slug == slug)
     )
-    activity = result.scalar_one_or_none()
+    activity = result.scalars().first()
     if not activity:
         raise NotFoundError("Activity not found")
     return ActivityResponse.model_validate(activity)
@@ -187,7 +200,7 @@ async def get_activity(
     db: AsyncSession = Depends(get_db),
 ):
     """Get activity details."""
-    activity = await db.get(Activity, activity_id)
+    activity = await _get_activity_with_timeline(db, activity_id)
     if not activity:
         raise NotFoundError("Activity not found")
     return ActivityResponse.model_validate(activity)
@@ -220,8 +233,8 @@ async def update_activity(
     )
     await db.commit()
 
-    # Re-fetch
-    activity = await db.get(Activity, activity_id)
+    # Re-fetch with timeline
+    activity = await _get_activity_with_timeline(db, activity_id)
     return ActivityResponse.model_validate(activity)
 
 
@@ -254,7 +267,7 @@ async def update_activity_status(
     )
     await db.commit()
 
-    activity = await db.get(Activity, activity_id)
+    activity = await _get_activity_with_timeline(db, activity_id)
     return ActivityResponse.model_validate(activity)
 
 
@@ -300,5 +313,5 @@ async def re_enrich_activity(
     activity = await enrich_activity(db, activity)
     await db.commit()
 
-    activity = await db.get(Activity, activity_id)
+    activity = await _get_activity_with_timeline(db, activity_id)
     return ActivityResponse.model_validate(activity)

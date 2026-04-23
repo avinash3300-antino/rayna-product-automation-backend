@@ -1,43 +1,49 @@
+"""Master pipeline orchestrator — product-type aware.
+
+Dispatches to the correct pipeline (activity, cruise, etc.) via the router.
+"""
+
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
 from app.db.models.activities import Activity
+from app.db.models.cruises import CruiseProduct
 from app.db.models.destinations import CatalogDestination
 from app.db.models.scraping import ScrapeJob, ScrapeSource
-from app.services.enrichment_service import enrich_activity
-from app.services.geocoding_service import geocode_activity
-from app.services.image_service import fetch_and_upload_images
-from app.services.review_service import scrape_reviews_for_activity
-from app.services.scraping_service import (
-    extract_activities,
-    save_extracted_activities,
-    scrape_source,
-)
+from app.services.pipelines import get_pipeline
+from app.services.scraping_service import extract_products, scrape_source
 
 logger = logging.getLogger(__name__)
 
 
-async def run_activity_pipeline(
+async def run_product_pipeline(
     db: AsyncSession,
     source_id: uuid.UUID,
+    product_type: str = "activities",
     triggered_by: uuid.UUID | None = None,
+    existing_job_id: uuid.UUID | None = None,
 ) -> ScrapeJob:
     """Master orchestrator: scrape → extract → save → enrich per source.
 
-    Returns the completed ScrapeJob with all counts.
+    Dispatches to the appropriate pipeline based on product_type.
     """
+    pipeline = get_pipeline(product_type)
+
     # Load source
     source = await db.get(ScrapeSource, source_id)
     if not source:
         raise NotFoundError("Scrape source not found")
 
-    # Load destination for city/country names
+    _source_id = source.id
+    _source_url = source.source_url
+
+    # Load destination
     dest = await db.get(CatalogDestination, source.city_id)
     if not dest:
         raise NotFoundError("Destination not found")
@@ -45,38 +51,51 @@ async def run_activity_pipeline(
     city_name = dest.city_name or dest.name
     country_name = dest.country_name or ""
 
-    # Create scrape job
-    job = ScrapeJob(
-        discovery_run_id=source.discovery_run_id,
-        city_id=source.city_id,
-        category=source.category,
-        status="scraping",
-        source_id=source.id,
-        source_url=source.source_url,
-        scrape_type="apify",
-        triggered_by=triggered_by,
-        started_at=datetime.now(timezone.utc),
-    )
-    db.add(job)
-    await db.flush()
+    # Create or reuse scrape job
+    if existing_job_id:
+        job = await db.get(ScrapeJob, existing_job_id)
+        if not job:
+            raise NotFoundError("Scrape job not found")
+        job.status = "scraping"
+        job.started_at = datetime.now(timezone.utc)
+        await db.flush()
+    else:
+        job = ScrapeJob(
+            discovery_run_id=source.discovery_run_id,
+            city_id=source.city_id,
+            category=source.category,
+            product_type=product_type,
+            status="scraping",
+            source_id=source.id,
+            source_url=source.source_url,
+            scrape_type="apify",
+            triggered_by=triggered_by,
+            started_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        await db.flush()
 
+    _job_id = job.id
     errors = []
 
     try:
         # ── Step 1: Scrape the source ────────────────────────────────
-        logger.info("Scraping source %s: %s", source.id, source.source_url)
+        logger.info("Scraping source %s: %s", _source_id, _source_url)
         pages = await scrape_source(source)
         job.pages_scraped = len(pages)
         job.scrape_type = pages[0]["source_type"] if pages else "apify"
         job.status = "extracting"
         await db.flush()
 
-        # ── Step 2: Extract activities from each page ────────────────
+        # ── Step 2: Extract products from each page ──────────────────
+        extraction_prompt = pipeline.get_extraction_prompt()
         all_extracted = []
         for page in pages:
             try:
-                extracted = await extract_activities(
-                    page["clean_markdown"], page["url"]
+                extracted = await extract_products(
+                    page["clean_markdown"],
+                    page["url"],
+                    extraction_prompt,
                 )
                 all_extracted.extend(extracted)
             except Exception as exc:
@@ -93,7 +112,7 @@ async def run_activity_pipeline(
 
         # ── Step 3: Deduplicate & save ───────────────────────────────
         if all_extracted:
-            counts = await save_extracted_activities(
+            counts = await pipeline.save_extracted_products(
                 db, all_extracted, source, job, city_name, country_name
             )
             job.records_saved = counts["saved"]
@@ -105,60 +124,37 @@ async def run_activity_pipeline(
         job.status = "enriching"
         await db.flush()
 
-        # ── Step 4: Enrich ALL saved activities (mandatory rewrite) ──
+        # ── Step 4: Enrich all saved products (mandatory rewrite) ────
         enriched_count = 0
         if job.records_saved > 0:
-            # Get ALL recently saved activities — enrichment is mandatory
-            # for copyright safety (every description must be rewritten)
-            enrichment_cutoff = job.started_at - timedelta(seconds=30)
-            result = await db.execute(
-                select(Activity)
-                .where(
-                    Activity.city_id == source.city_id,
-                    Activity.status == "draft",
-                    Activity.created_at >= enrichment_cutoff,
-                )
-                .order_by(Activity.created_at.desc())
-                .limit(job.records_saved)
+            products_to_enrich = await pipeline.get_recently_saved_products(
+                db, source.city_id, job.started_at, job.records_saved,
             )
-            activities_to_enrich = list(result.scalars().all())
-
-            for activity in activities_to_enrich:
+            for product in products_to_enrich:
                 try:
-                    await enrich_activity(db, activity)
+                    await pipeline.enrich_product(db, product)
                     enriched_count += 1
                 except Exception as exc:
-                    errors.append(
-                        {
-                            "activity_id": str(activity.id),
-                            "error": str(exc),
-                            "step": "enrichment",
-                        }
-                    )
+                    errors.append({
+                        "product_id": str(product.id),
+                        "error": str(exc),
+                        "step": "enrichment",
+                    })
                     logger.warning(
-                        "Enrichment failed for activity %s: %s",
-                        activity.id,
-                        exc,
+                        "Enrichment failed for %s %s: %s",
+                        product_type, product.id, exc,
                     )
 
         job.records_enriched = enriched_count
 
-        # ── Step 5-7: Gallery, geocoding, reviews for enriched activities ──
+        # ── Step 5-7: Gallery, geocoding, reviews ────────────────────
         if enriched_count > 0 or job.records_saved > 0:
-            enrichment_cutoff = job.started_at - timedelta(seconds=30)
-            result = await db.execute(
-                select(Activity)
-                .where(
-                    Activity.city_id == source.city_id,
-                    Activity.created_at >= enrichment_cutoff,
-                )
-                .order_by(Activity.created_at.desc())
-                .limit(max(job.records_saved, enriched_count))
+            post_products = await pipeline.get_recently_saved_products(
+                db, source.city_id, job.started_at,
+                max(job.records_saved, enriched_count),
             )
-            post_activities = list(result.scalars().all())
-
-            for activity in post_activities:
-                await _run_post_enrichment(db, activity, errors)
+            for product in post_products:
+                await pipeline.run_post_enrichment(db, product, errors)
 
         await db.flush()
 
@@ -167,153 +163,98 @@ async def run_activity_pipeline(
         job.errors_json = {"errors": errors} if errors else None
         job.completed_at = datetime.now(timezone.utc)
 
-        # Update source last_scraped_at
         source.last_scraped_at = datetime.now(timezone.utc)
 
         await db.flush()
         await db.commit()
 
         logger.info(
-            "Pipeline completed for source %s: %d found, %d saved, %d dup, %d enriched",
-            source.id,
-            job.records_found,
-            job.records_saved,
-            job.records_skipped_dup,
-            job.records_enriched,
+            "Pipeline completed for %s source %s: %d found, %d saved, %d dup, %d enriched",
+            product_type, source.id,
+            job.records_found, job.records_saved,
+            job.records_skipped_dup, job.records_enriched,
         )
         return job
 
     except Exception as exc:
         await db.rollback()
-        # Re-fetch job in a fresh transaction to update its status
-        job = await db.get(ScrapeJob, job.id)
+        job = await db.get(ScrapeJob, _job_id)
         if job:
             job.status = "failed"
             job.errors_json = {"errors": errors, "fatal": str(exc)}
             job.completed_at = datetime.now(timezone.utc)
             await db.commit()
-        logger.error("Pipeline failed for source %s: %s", source.id, exc)
+        logger.error("Pipeline failed for source %s: %s", _source_id, exc)
         raise
 
 
-async def _run_post_enrichment(
+# ── Backward compatibility alias ────────────────────────────────────────
+
+async def run_activity_pipeline(
     db: AsyncSession,
-    activity: Activity,
-    errors: list[dict],
-) -> None:
-    """Run Freepik images, geocoding, and review scraping for one activity."""
-    # ── Step 5: Gallery images (Freepik → Cloudinary) ─────────────
-    if not activity.gallery_json:
-        try:
-            gallery = await fetch_and_upload_images(
-                activity.name, activity.city, str(activity.id), num_images=8
-            )
-            if gallery:
-                activity.gallery_json = gallery
-                # Use first Freepik image as cover too
-                if not activity.cover_image_url:
-                    activity.cover_image_url = gallery[0]["url"]
-                logger.info(
-                    "Gallery: %d Freepik images for '%s'",
-                    len(gallery), activity.name,
-                )
-        except Exception as exc:
-            errors.append({
-                "activity_id": str(activity.id),
-                "error": str(exc),
-                "step": "gallery",
-            })
-            logger.warning("Gallery failed for %s: %s", activity.id, exc)
-
-    # ── Step 6: Geocoding ───────────────────────────────────────────
-    if activity.lat == 0 and activity.lng == 0:
-        try:
-            coords = await geocode_activity(
-                activity.name, activity.city, activity.country, activity.address
-            )
-            if coords["lat"] != 0:
-                activity.lat = coords["lat"]
-                activity.lng = coords["lng"]
-                logger.info(
-                    "Geocoded '%s': %s, %s",
-                    activity.name, coords["lat"], coords["lng"],
-                )
-        except Exception as exc:
-            errors.append({
-                "activity_id": str(activity.id),
-                "error": str(exc),
-                "step": "geocoding",
-            })
-            logger.warning("Geocoding failed for %s: %s", activity.id, exc)
-
-    # ── Step 7: Reviews ─────────────────────────────────────────────
-    if not activity.review_snippets:
-        try:
-            review_result = await scrape_reviews_for_activity(
-                db, activity.id, platforms=["google", "tripadvisor"]
-            )
-            logger.info(
-                "Reviews: %d scraped for '%s'",
-                review_result.get("total_scraped", 0), activity.name,
-            )
-        except Exception as exc:
-            errors.append({
-                "activity_id": str(activity.id),
-                "error": str(exc),
-                "step": "reviews",
-            })
-            logger.warning("Review scrape failed for %s: %s", activity.id, exc)
-
-    await db.flush()
+    source_id: uuid.UUID,
+    triggered_by: uuid.UUID | None = None,
+    existing_job_id: uuid.UUID | None = None,
+) -> ScrapeJob:
+    """Legacy wrapper — runs the activities pipeline."""
+    return await run_product_pipeline(
+        db, source_id,
+        product_type="activities",
+        triggered_by=triggered_by,
+        existing_job_id=existing_job_id,
+    )
 
 
 async def run_post_enrichment_for_city(
     db: AsyncSession,
     city_id: uuid.UUID,
+    product_type: str = "activities",
 ) -> dict:
-    """Run gallery, geocoding, and reviews for all activities in a city.
+    """Run gallery, geocoding, and reviews for all products in a city."""
+    pipeline = get_pipeline(product_type)
 
-    Use this to backfill data for activities that were scraped before
-    these pipeline steps existed.
-    """
+    if product_type == "cruises":
+        model = CruiseProduct
+    else:
+        model = Activity
+
     result = await db.execute(
-        select(Activity).where(Activity.city_id == city_id)
+        select(model).where(model.city_id == city_id)
     )
-    activities = list(result.scalars().all())
+    products = list(result.scalars().all())
 
-    if not activities:
-        raise NotFoundError("No activities found for this city")
+    if not products:
+        raise NotFoundError(f"No {product_type} found for this city")
 
     errors: list[dict] = []
-    counts = {"gallery": 0, "geocoded": 0, "reviews": 0, "total": len(activities)}
+    counts = {"gallery": 0, "geocoded": 0, "reviews": 0, "total": len(products)}
 
-    for i, activity in enumerate(activities, 1):
+    for i, product in enumerate(products, 1):
         logger.info(
             "[%d/%d] Processing '%s'...",
-            i, len(activities), activity.name,
+            i, len(products), product.name,
         )
-        had_gallery = bool(activity.gallery_json)
-        had_coords = activity.lat != 0
-        had_reviews = bool(activity.review_snippets)
+        had_gallery = bool(product.gallery_json)
+        had_coords = product.lat != 0
+        had_reviews = bool(product.review_snippets)
 
-        await _run_post_enrichment(db, activity, errors)
+        await pipeline.run_post_enrichment(db, product, errors)
 
-        if not had_gallery and activity.gallery_json:
+        if not had_gallery and product.gallery_json:
             counts["gallery"] += 1
-        if not had_coords and activity.lat != 0:
+        if not had_coords and product.lat != 0:
             counts["geocoded"] += 1
-        if not had_reviews and activity.review_snippets:
+        if not had_reviews and product.review_snippets:
             counts["reviews"] += 1
 
-        # Rate limit to avoid 429s from SearchAPI
-        if i < len(activities):
+        if i < len(products):
             await asyncio.sleep(2)
 
     await db.commit()
 
     logger.info(
-        "Post-enrichment for city %s: %d activities, %d gallery, %d geocoded, %d reviews",
-        city_id, counts["total"], counts["gallery"],
+        "Post-enrichment for %s city %s: %d products, %d gallery, %d geocoded, %d reviews",
+        product_type, city_id, counts["total"], counts["gallery"],
         counts["geocoded"], counts["reviews"],
     )
     return {"counts": counts, "errors": errors}
@@ -323,6 +264,7 @@ async def run_pipeline_for_discovery(
     db: AsyncSession,
     discovery_run_id: uuid.UUID,
     category: str,
+    product_type: str = "activities",
     triggered_by: uuid.UUID | None = None,
 ) -> list[ScrapeJob]:
     """Run pipeline for all approved sources from a discovery run."""
@@ -338,16 +280,83 @@ async def run_pipeline_for_discovery(
     if not sources:
         raise NotFoundError("No approved sources found for this discovery run")
 
+    source_info = [(s.id, s.source_url) for s in sources]
+
     jobs = []
-    for source in sources:
+    for sid, surl in source_info:
         try:
-            job = await run_activity_pipeline(db, source.id, triggered_by)
+            job = await run_product_pipeline(
+                db, sid, product_type=product_type, triggered_by=triggered_by,
+            )
             jobs.append(job)
         except Exception as exc:
             logger.error(
                 "Pipeline failed for source %s (%s): %s",
-                source.id,
-                source.source_url,
-                exc,
+                sid, surl, exc,
             )
     return jobs
+
+
+async def create_pending_jobs(
+    db: AsyncSession,
+    discovery_run_id: uuid.UUID,
+    category: str,
+    product_type: str = "activities",
+    triggered_by: uuid.UUID | None = None,
+) -> list[ScrapeJob]:
+    """Create pending ScrapeJob records for all approved sources."""
+    result = await db.execute(
+        select(ScrapeSource).where(
+            ScrapeSource.discovery_run_id == discovery_run_id,
+            ScrapeSource.approved.is_(True),
+            ScrapeSource.is_active.is_(True),
+        )
+    )
+    sources = list(result.scalars().all())
+
+    if not sources:
+        raise NotFoundError("No approved sources found for this discovery run")
+
+    jobs = []
+    for source in sources:
+        job = ScrapeJob(
+            discovery_run_id=source.discovery_run_id,
+            city_id=source.city_id,
+            category=source.category,
+            product_type=product_type,
+            status="pending",
+            source_id=source.id,
+            source_url=source.source_url,
+            scrape_type="apify",
+            triggered_by=triggered_by,
+        )
+        db.add(job)
+        jobs.append(job)
+
+    await db.flush()
+    await db.commit()
+    return jobs
+
+
+async def process_pending_jobs(
+    job_source_pairs: list[tuple[uuid.UUID, uuid.UUID]],
+    product_type: str = "activities",
+    triggered_by: uuid.UUID | None = None,
+) -> None:
+    """Background processor: run pipeline for each pending job sequentially."""
+    from app.db.base import async_session_factory
+
+    for job_id, source_id in job_source_pairs:
+        async with async_session_factory() as db:
+            try:
+                await run_product_pipeline(
+                    db, source_id,
+                    product_type=product_type,
+                    triggered_by=triggered_by,
+                    existing_job_id=job_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Background pipeline failed for job %s / source %s: %s",
+                    job_id, source_id, exc,
+                )
