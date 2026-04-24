@@ -69,6 +69,9 @@ class ActivityResponse(BaseModel):
     price_type: str
     discount_pct: float | None = None
     price_from: float
+    scraped_prices: list | None = None
+    local_currency: str | None = None
+    price_local: float | None = None
     duration_minutes: int
     start_times: list | None = None
     operating_days: list | None = None

@@ -13,6 +13,7 @@ class ReviewResponse(BaseModel):
     rating: float | None = None
     review_title: str | None = None
     review_text: str
+    enriched_text: str | None = None
     review_date: str | None = None
     source_platform: str
     source_url: str | None = None

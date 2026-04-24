@@ -45,6 +45,7 @@ class ProductReview(Base):
     rating: Mapped[float | None] = mapped_column(Numeric(3, 2))
     review_title: Mapped[str | None] = mapped_column(String(500))
     review_text: Mapped[str] = mapped_column(Text, nullable=False)
+    enriched_text: Mapped[str | None] = mapped_column(Text)
     review_date: Mapped[str | None] = mapped_column(String(100))
 
     # ── Source ───────────────────────────────────────────────────────────

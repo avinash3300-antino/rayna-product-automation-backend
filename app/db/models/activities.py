@@ -69,6 +69,11 @@ class Activity(Base):
     discount_pct: Mapped[float | None] = mapped_column(Numeric(5, 2))
     price_from: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
 
+    # ── Scraped Pricing ──────────────────────────────────────────────────
+    scraped_prices = mapped_column(JSON, nullable=True)  # [{source, url, local_currency, local_price, aed_price, scraped_at}]
+    local_currency: Mapped[str | None] = mapped_column(String(3))
+    price_local: Mapped[float | None] = mapped_column(Numeric(10, 2))
+
     # ── Duration & Scheduling ─────────────────────────────────────────────
     duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     start_times = mapped_column(JSON, nullable=False)

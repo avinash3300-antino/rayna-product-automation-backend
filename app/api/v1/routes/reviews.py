@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import CurrentUser, get_db, require_role
 from app.db.models.auth import AuthUser
 from app.schemas.reviews import ReviewListResponse, ReviewResponse, ScrapeReviewsRequest
-from app.services.review_service import get_reviews_for_product, scrape_reviews_for_product
+from app.services.review_service import (
+    get_reviews_for_product,
+    scrape_reviews_for_product,
+    enrich_reviews_for_product,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/reviews", tags=["reviews"])
@@ -92,6 +96,20 @@ async def scrape_activity_reviews(
         db, activity_id,
         product_type="activities",
         platforms=platforms,
+    )
+    await db.commit()
+    return result
+
+
+@activity_review_router.post("/enrich")
+async def enrich_activity_reviews(
+    activity_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Enrich all reviews for an activity using Claude AI."""
+    result = await enrich_reviews_for_product(
+        db, activity_id, product_type="activities"
     )
     await db.commit()
     return result

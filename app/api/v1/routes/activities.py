@@ -315,3 +315,17 @@ async def re_enrich_activity(
 
     activity = await _get_activity_with_timeline(db, activity_id)
     return ActivityResponse.model_validate(activity)
+
+
+@router.post("/{activity_id}/scrape-pricing")
+async def scrape_activity_pricing(
+    activity_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Scrape current pricing from source URLs."""
+    from app.services.pricing_service import scrape_pricing_for_activity
+
+    result = await scrape_pricing_for_activity(db, activity_id)
+    await db.commit()
+    return result

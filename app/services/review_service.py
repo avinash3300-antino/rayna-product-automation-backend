@@ -421,3 +421,61 @@ Extract up to {max_reviews} real reviews with rating, reviewer name, review text
     except Exception as exc:
         logger.warning("Claude review extraction failed for %s: %s", platform, exc)
         return []
+
+
+# ── Review Enrichment (Claude rewrite) ───────────────────────────────────
+
+ENRICH_SYSTEM_PROMPT = """You are a professional review editor for a premium travel company. \
+Rewrite the following user review to be more polished, grammatically correct, and professional \
+while preserving the original sentiment, key facts, and rating context. \
+Keep approximately the same length. Do NOT change the reviewer's opinion or add information \
+not in the original. Return ONLY the rewritten review text, nothing else."""
+
+
+async def enrich_single_review(original_text: str) -> str | None:
+    """Rewrite a single review using Claude."""
+    try:
+        result = await claude_client.generate(
+            prompt=f"Original review:\n\n{original_text}\n\nRewrite this review professionally:",
+            system=ENRICH_SYSTEM_PROMPT,
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            temperature=0.3,
+        )
+        return result.strip()
+    except Exception as exc:
+        logger.error("Review enrichment failed: %s", exc)
+        return None
+
+
+async def enrich_reviews_for_product(
+    db: AsyncSession,
+    product_id: UUID,
+    product_type: str = "activities",
+) -> dict:
+    """Enrich all un-enriched reviews for a product using Claude AI."""
+    stmt = select(ProductReview).where(
+        ProductReview.product_type == product_type,
+        ProductReview.product_id == product_id,
+        ProductReview.enriched_text.is_(None),
+    )
+    result = await db.execute(stmt)
+    reviews = result.scalars().all()
+
+    enriched_count = 0
+    failed_count = 0
+
+    for review in reviews:
+        enriched = await enrich_single_review(review.review_text)
+        if enriched:
+            review.enriched_text = enriched
+            enriched_count += 1
+        else:
+            failed_count += 1
+
+    return {
+        "product_id": str(product_id),
+        "total_reviews": len(reviews),
+        "enriched": enriched_count,
+        "failed": failed_count,
+    }
