@@ -1,4 +1,8 @@
-"""Backfill gallery images for activities missing them (Freepik -> Pexels -> Unsplash)."""
+"""Backfill gallery images for activities missing them (Freepik -> Pexels -> Unsplash).
+
+Usage: python backfill_gallery.py [--city Cairo] [--num-images 8]
+"""
+import argparse
 import asyncio
 import logging
 
@@ -11,38 +15,34 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger("backfill_gallery")
 
-LONDON_CITY_ID = "c5cda0a7-0b95-4a26-a8b4-1001b81014a5"
 
-
-async def main():
-    from uuid import UUID
+async def main(city_name: str, num_images: int):
     from app.db.base import async_session_factory
     from app.services.image_service import fetch_and_upload_images
     from sqlalchemy import select
     from app.db.models.activities import Activity
 
-    city_id = UUID(LONDON_CITY_ID)
-
     async with async_session_factory() as db:
         result = await db.execute(
             select(Activity).where(
-                Activity.city_id == city_id,
+                Activity.city == city_name,
                 Activity.gallery_json == None,
             ).order_by(Activity.category)
         )
         activities = list(result.scalars().all())
 
-    logger.info("Found %d activities needing gallery images", len(activities))
+    logger.info("Found %d %s activities needing gallery images", len(activities), city_name)
 
     success = 0
     failed = 0
 
     for i, act in enumerate(activities, 1):
-        logger.info("[%d/%d] %s - %s", i, len(activities), act.category, act.name)
+        short_name = act.name[:55].encode("ascii", "replace").decode()
+        logger.info("[%d/%d] %s - %s", i, len(activities), act.category, short_name)
         try:
             gallery = await fetch_and_upload_images(
-                act.name, act.city or "London", str(act.id),
-                product_type="activities", num_images=8,
+                act.name, act.city or city_name, str(act.id),
+                product_type="activities", num_images=num_images,
             )
             if gallery:
                 async with async_session_factory() as db:
@@ -70,4 +70,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--city", default="Cairo", help="City name to backfill")
+    parser.add_argument("--num-images", type=int, default=8, help="Images per activity")
+    args = parser.parse_args()
+
+    asyncio.run(main(args.city, args.num_images))

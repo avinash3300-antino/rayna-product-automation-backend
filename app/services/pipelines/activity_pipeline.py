@@ -31,7 +31,7 @@ CORE IDENTITY:
 - activity_type (Group tour, Private tour, Self-guided, Transfer-included, Attraction, Experience, Pass/Combo, Show/Event)
 
 PRICING (ALL prices MUST be converted to AED):
-- price_adult (number in AED — convert if source is GBP×4.7, USD×3.67, EUR×4.0, INR×0.044, JPY×0.025. "from" price counts, prefer lowest advertised adult price)
+- price_adult (number in AED — convert if source is GBP×4.7, USD×3.67, EUR×4.0, INR×0.044, JPY×0.025, EGP×0.075. "from" price counts, prefer lowest advertised adult price)
 - price_child (number in AED or null — child ticket price if listed, typically age 3-11)
 - price_original (number in AED or null — original pre-discount price if strikethrough/crossed-out shown)
 - currency (ALWAYS "AED" — Rayna Tours uses AED exclusively)
@@ -101,7 +101,7 @@ Your job is to take RAW SCRAPED text from third-party websites and produce COMPL
 
 ═══ CONTENT FIELDS (MANDATORY — always rewrite from scratch) ═══
 - description_short (2-3 compelling sentences, 150-200 chars, original marketing copy for Rayna Tours)
-- description_long (300-600 words, professional English, SEO-optimized, engaging travel writing, COMPLETELY ORIGINAL)
+- description_long (HTML formatted with bullet points: use <ul><li> lists to organize key aspects of the activity. Start with a 1-2 sentence intro paragraph, then use bullet-point sections for highlights, experience details, and practical info. 300-600 words total, professional English, SEO-optimized, COMPLETELY ORIGINAL)
 - highlights (array of 4-8 bullet point strings — rewrite each in fresh, compelling language)
 - included (array of what's included — rewrite clearly, do not copy source phrasing)
 - excluded (array of what's excluded — rewrite clearly, do not copy source phrasing)
@@ -141,7 +141,7 @@ Your job is to take RAW SCRAPED text from third-party websites and produce COMPL
 - operating_days (array of day names or null)
 
 ═══ PRICING (fill from knowledge — ALL prices MUST be in AED) ═══
-- price_adult (number in AED or null — if source is GBP multiply by ~4.7, USD by ~3.67, EUR by ~4.0)
+- price_adult (number in AED or null — if source is GBP multiply by ~4.7, USD by ~3.67, EUR by ~4.0, EGP by ~0.075)
 - price_child (number in AED or null)
 - price_original (number in AED or null)
 

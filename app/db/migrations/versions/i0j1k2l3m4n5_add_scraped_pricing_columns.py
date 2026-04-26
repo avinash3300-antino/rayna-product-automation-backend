@@ -20,9 +20,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("activities", sa.Column("scraped_prices", JSON, nullable=True))
-    op.add_column("activities", sa.Column("local_currency", sa.String(3), nullable=True))
-    op.add_column("activities", sa.Column("price_local", sa.Numeric(10, 2), nullable=True))
+    # Use IF NOT EXISTS so this is safe on DBs where columns were added manually
+    op.execute("ALTER TABLE activities ADD COLUMN IF NOT EXISTS scraped_prices JSON")
+    op.execute("ALTER TABLE activities ADD COLUMN IF NOT EXISTS local_currency VARCHAR(3)")
+    op.execute("ALTER TABLE activities ADD COLUMN IF NOT EXISTS price_local NUMERIC(10, 2)")
 
 
 def downgrade() -> None:

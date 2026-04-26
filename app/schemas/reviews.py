@@ -14,6 +14,7 @@ class ReviewResponse(BaseModel):
     review_title: str | None = None
     review_text: str
     enriched_text: str | None = None
+    enriched_reviewer_name: str | None = None
     review_date: str | None = None
     source_platform: str
     source_url: str | None = None
