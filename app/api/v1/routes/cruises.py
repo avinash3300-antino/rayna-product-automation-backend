@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import CurrentUser, get_db, require_role
 from app.core.exceptions import NotFoundError
@@ -172,7 +173,13 @@ async def get_cruise_by_slug(
 ):
     """Get cruise by slug."""
     result = await db.execute(
-        select(CruiseProduct).where(CruiseProduct.slug == slug)
+        select(CruiseProduct)
+        .where(CruiseProduct.slug == slug)
+        .options(
+            selectinload(CruiseProduct.itinerary),
+            selectinload(CruiseProduct.cabins),
+            selectinload(CruiseProduct.pricing_tiers),
+        )
     )
     cruise = result.scalar_one_or_none()
     if not cruise:
@@ -190,7 +197,16 @@ async def get_cruise(
     db: AsyncSession = Depends(get_db),
 ):
     """Get cruise details."""
-    cruise = await db.get(CruiseProduct, cruise_id)
+    result = await db.execute(
+        select(CruiseProduct)
+        .where(CruiseProduct.id == cruise_id)
+        .options(
+            selectinload(CruiseProduct.itinerary),
+            selectinload(CruiseProduct.cabins),
+            selectinload(CruiseProduct.pricing_tiers),
+        )
+    )
+    cruise = result.scalar_one_or_none()
     if not cruise:
         raise NotFoundError("Cruise not found")
     return CruiseResponse.model_validate(cruise)

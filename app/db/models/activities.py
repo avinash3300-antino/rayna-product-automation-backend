@@ -169,6 +169,20 @@ class Activity(Base):
         Integer, nullable=False, server_default="0"
     )
 
+    # ── Classification flags ──────────────────────────────────────────────
+    is_package: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    has_transport: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    has_meals: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
+    # ── FAQs ───────────────────────────────────────────────────────────────
+    faqs = mapped_column(JSON, nullable=True)  # [{question: str, answer: str}]
+
     # ── Catchall ──────────────────────────────────────────────────────────
     other_attributes = mapped_column(JSON, nullable=True)  # [{label, value, category_hint}]
 

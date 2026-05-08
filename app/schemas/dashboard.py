@@ -56,4 +56,4 @@ class DashboardStatsResponse(BaseModel):
     pipeline_stages: list[PipelineStage] = []
     recent_jobs: list[RecentJobItem] = []
     products_by_destination: list[ProductsByDestinationItem] = []
-    products_by_category: list[ProductsByCategoryItem] = []
+    products_by_category: dict[str, list[ProductsByCategoryItem]] = {}

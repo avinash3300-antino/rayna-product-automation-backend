@@ -143,20 +143,34 @@ async def get_dashboard_stats(db: AsyncSession) -> DashboardStatsResponse:
         reverse=True,
     )
 
-    # ── Products by category ─────────────────────────────────────────
+    # ── Products by category (grouped by destination) ────────────────
     cat_q = await db.execute(
-        select(Activity.category, func.count(Activity.id))
+        select(
+            CatalogDestination.name,
+            Activity.category,
+            func.count(Activity.id),
+        )
+        .join(CatalogDestination, Activity.city_id == CatalogDestination.id)
         .where(Activity.category.isnot(None))
-        .group_by(Activity.category)
+        .group_by(CatalogDestination.name, Activity.category)
     )
-    products_by_category = sorted(
-        [
-            ProductsByCategoryItem(category=cat or "Uncategorized", count=count)
-            for cat, count in cat_q.all()
-        ],
-        key=lambda x: x.count,
-        reverse=True,
-    )
+    cat_by_dest: dict[str, dict[str, int]] = {}
+    for dest_name, cat, count in cat_q.all():
+        cat_by_dest.setdefault(dest_name, {})
+        cat_by_dest[dest_name][cat or "Uncategorized"] = (
+            cat_by_dest[dest_name].get(cat or "Uncategorized", 0) + count
+        )
+
+    products_by_category: dict[str, list[ProductsByCategoryItem]] = {}
+    for dest_name, cats in cat_by_dest.items():
+        products_by_category[dest_name] = sorted(
+            [
+                ProductsByCategoryItem(category=c, count=n)
+                for c, n in cats.items()
+            ],
+            key=lambda x: x.count,
+            reverse=True,
+        )
 
     return DashboardStatsResponse(
         kpi=kpi,

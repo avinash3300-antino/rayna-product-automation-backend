@@ -25,6 +25,9 @@ class ActivityCard(BaseModel):
     duration_minutes: int
     quality_score: int = 0
     status: str = "draft"
+    is_package: bool = False
+    has_transport: bool = False
+    has_meals: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -131,6 +134,10 @@ class ActivityResponse(BaseModel):
     verified: bool = False
     dedup_hash: str
     quality_score: int = 0
+    is_package: bool = False
+    has_transport: bool = False
+    has_meals: bool = False
+    faqs: list | None = None
     other_attributes: list | None = None
     timeline: list[ActivityTimelineItem] = []
     created_at: datetime
@@ -292,9 +299,13 @@ class ActivityUpdate(BaseModel):
     operator_established_year: int | None = None
     operator_certifications: list | None = None
     dress_code_note: str | None = None
+    faqs: list | None = None
     other_attributes: list | None = None
     verified: bool | None = None
     quality_score: int | None = None
+    is_package: bool | None = None
+    has_transport: bool | None = None
+    has_meals: bool | None = None
 
 
 class ActivityStatusUpdate(BaseModel):
