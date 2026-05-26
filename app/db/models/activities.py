@@ -183,6 +183,12 @@ class Activity(Base):
     # ── FAQs ───────────────────────────────────────────────────────────────
     faqs = mapped_column(JSON, nullable=True)  # [{question: str, answer: str}]
 
+    # ── Tour Variants ──────────────────────────────────────────────────────
+    tour_variants = mapped_column(JSON, nullable=True)  # [{name, description, duration_minutes, price: {amount, currency}, includes, excludes, is_default}]
+
+    # ── Daily Availability (Playwright-scraped) ──────────────────────────
+    daily_availability = mapped_column(JSON, nullable=True)  # {scraped_at, source_url, week_start, daily: {Monday: {date, available, time_slots, tour_options}, ...}}
+
     # ── Catchall ──────────────────────────────────────────────────────────
     other_attributes = mapped_column(JSON, nullable=True)  # [{label, value, category_hint}]
 

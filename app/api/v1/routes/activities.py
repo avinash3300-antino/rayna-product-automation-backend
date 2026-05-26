@@ -207,6 +207,77 @@ async def export_activities_csv(
     )
 
 
+@router.post("/bulk/scrape-daily-availability")
+async def bulk_scrape_daily_availability(
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+    city: str | None = Query(None),
+    limit: int = Query(5, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+):
+    """Bulk scrape day-wise availability using Playwright for multiple activities."""
+    from app.services.playwright_scraper import scrape_daily_for_activity
+
+    query = select(Activity).where(Activity.source_urls.isnot(None))
+    if city:
+        query = query.where(Activity.city.ilike(city))
+    query = query.order_by(Activity.name).offset(offset).limit(limit)
+
+    result = await db.execute(query)
+    activities = list(result.scalars().all())
+
+    results = []
+    for activity in activities:
+        try:
+            res = await scrape_daily_for_activity(db, activity.id)
+            results.append(res)
+        except Exception as exc:
+            results.append({
+                "activity_id": str(activity.id),
+                "name": activity.name,
+                "error": str(exc),
+                "updated": False,
+            })
+
+    await db.commit()
+    return {
+        "processed": len(activities),
+        "results": results,
+    }
+
+
+@router.post("/bulk/scrape-variants")
+async def bulk_scrape_activity_variants(
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+    city: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Bulk scrape tour variants for multiple activities."""
+    from app.services.tour_variants_service import bulk_scrape_variants
+
+    result = await bulk_scrape_variants(db, city=city, limit=limit, offset=offset)
+    await db.commit()
+    return result
+
+
+@router.post("/bulk/scrape-availability")
+async def bulk_scrape_activity_availability(
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+    city: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Bulk scrape availability for multiple activities. Use city filter and pagination."""
+    from app.services.availability_service import bulk_scrape_availability
+
+    result = await bulk_scrape_availability(db, city=city, limit=limit, offset=offset)
+    await db.commit()
+    return result
+
+
 @router.get("", response_model=PaginatedResponse[ActivityCard])
 async def list_activities(
     current_user: CurrentUser,
@@ -455,6 +526,48 @@ async def scrape_activity_pricing(
     from app.services.pricing_service import scrape_pricing_for_activity
 
     result = await scrape_pricing_for_activity(db, activity_id)
+    await db.commit()
+    return result
+
+
+@router.post("/{activity_id}/scrape-availability")
+async def scrape_activity_availability(
+    activity_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Scrape availability (start_times, operating_days) from first source URL."""
+    from app.services.availability_service import scrape_availability_for_activity
+
+    result = await scrape_availability_for_activity(db, activity_id)
+    await db.commit()
+    return result
+
+
+@router.post("/{activity_id}/scrape-daily-availability")
+async def scrape_activity_daily_availability(
+    activity_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Scrape day-wise availability using Playwright (Mon-Sun time slots + options)."""
+    from app.services.playwright_scraper import scrape_daily_for_activity
+
+    result = await scrape_daily_for_activity(db, activity_id)
+    await db.commit()
+    return result
+
+
+@router.post("/{activity_id}/scrape-variants")
+async def scrape_activity_variants(
+    activity_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Scrape tour variants/options from source URLs."""
+    from app.services.tour_variants_service import scrape_variants_for_activity
+
+    result = await scrape_variants_for_activity(db, activity_id)
     await db.commit()
     return result
 

@@ -138,6 +138,8 @@ class ActivityResponse(BaseModel):
     has_transport: bool = False
     has_meals: bool = False
     faqs: list | None = None
+    tour_variants: list | None = None
+    daily_availability: dict | None = None
     other_attributes: list | None = None
     timeline: list[ActivityTimelineItem] = []
     created_at: datetime
@@ -222,6 +224,7 @@ class ActivityCreate(BaseModel):
     operator_established_year: int | None = None
     operator_certifications: list | None = None
     dress_code_note: str | None = None
+    tour_variants: list | None = None
     other_attributes: list | None = None
 
 
@@ -300,6 +303,8 @@ class ActivityUpdate(BaseModel):
     operator_certifications: list | None = None
     dress_code_note: str | None = None
     faqs: list | None = None
+    tour_variants: list | None = None
+    daily_availability: dict | None = None
     other_attributes: list | None = None
     verified: bool | None = None
     quality_score: int | None = None
