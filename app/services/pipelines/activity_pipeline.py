@@ -501,7 +501,12 @@ Scraped exclusions:
         product: Activity,
         errors: list[dict],
     ) -> None:
-        """Gallery, geocoding, reviews for one activity."""
+        """Gallery, geocoding, reviews, and tour variants for one activity.
+
+        Tour variants are scraped non-blockingly — a failure here doesn't
+        fail the pipeline. Uses the same date-click + AED conversion logic
+        as the manual /scrape-variants endpoint.
+        """
         await self.fetch_gallery(product, errors)
         await self.geocode(product, errors)
 
@@ -523,6 +528,25 @@ Scraped exclusions:
                     "step": "reviews",
                 })
                 logger.warning("Review scrape failed for %s: %s", product.id, exc)
+
+        # Tour variants — scrape options/packages from source URLs.
+        # Skipped if the activity already has variants (re-runs are no-ops).
+        if not (isinstance(product.tour_variants, list) and len(product.tour_variants) > 0):
+            try:
+                from app.services.tour_variants_service import scrape_variants_for_activity
+                result = await scrape_variants_for_activity(db, product.id)
+                if result.get("updated"):
+                    logger.info(
+                        "Variants scraped for %s: %s options",
+                        product.id, result.get("new_count"),
+                    )
+            except Exception as exc:
+                errors.append({
+                    "product_id": str(product.id),
+                    "error": str(exc),
+                    "step": "variants",
+                })
+                logger.warning("Variants scrape failed for %s: %s", product.id, exc)
 
         await db.flush()
 

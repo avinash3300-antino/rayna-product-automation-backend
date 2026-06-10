@@ -131,6 +131,11 @@ async def run_product_pipeline(
                 db, source.city_id, job.started_at, job.records_saved,
             )
             for product in products_to_enrich:
+                # Cooperative cancel check between activities
+                await db.refresh(job, ["status"])
+                if job.status == "cancelled":
+                    logger.info("Job %s cancelled — stopping after %d enriched", job.id, enriched_count)
+                    return job
                 try:
                     await pipeline.enrich_product(db, product)
                     enriched_count += 1

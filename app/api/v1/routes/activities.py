@@ -250,14 +250,23 @@ async def bulk_scrape_daily_availability(
 async def bulk_scrape_activity_variants(
     db: AsyncSession = Depends(get_db),
     current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
-    city: str | None = Query(None),
+    city: str | None = Query(None, description="Filter by city (e.g. 'London', 'Cairo')"),
+    source: str | None = Query(None, regex="^(gyg|viator|other)$", description="gyg / viator / other"),
+    missing_only: bool = Query(True, description="Only process activities without variants"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    """Bulk scrape tour variants for multiple activities."""
+    """Bulk scrape tour variants for multiple activities.
+
+    Synchronously processes up to `limit` activities (max 100). Returns
+    per-activity outcomes so the caller can paginate through the queue.
+    """
     from app.services.tour_variants_service import bulk_scrape_variants
 
-    result = await bulk_scrape_variants(db, city=city, limit=limit, offset=offset)
+    result = await bulk_scrape_variants(
+        db, city=city, source=source, missing_only=missing_only,
+        limit=limit, offset=offset,
+    )
     await db.commit()
     return result
 

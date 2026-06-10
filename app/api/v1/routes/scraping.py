@@ -130,3 +130,89 @@ async def get_scrape_job(
     if not job:
         raise NotFoundError("Scrape job not found")
     return ScrapeJobResponse.model_validate(job)
+
+
+@router.post("/jobs/process-pending")
+async def process_pending_jobs_endpoint(
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+    city_id: UUID | None = Query(None, description="Optional: only this city's pending jobs"),
+    product_type: str = Query("activities"),
+):
+    """Pick up any 'pending' scrape jobs and kick off background processing.
+
+    Useful after a backend restart where the original asyncio task died.
+    Returns the list of job IDs that were scheduled.
+    """
+    import asyncio
+    from app.services.pipeline_service import process_pending_jobs
+
+    q = select(ScrapeJob).where(ScrapeJob.status == "pending")
+    if city_id:
+        q = q.where(ScrapeJob.city_id == city_id)
+    result = await db.execute(q)
+    pending = list(result.scalars().all())
+
+    if not pending:
+        return {"scheduled": 0, "job_ids": []}
+
+    job_source_pairs = [(j.id, j.source_id) for j in pending if j.source_id]
+
+    asyncio.create_task(
+        process_pending_jobs(
+            job_source_pairs,
+            product_type=product_type,
+            triggered_by=current_user.id,
+        )
+    )
+
+    return {
+        "scheduled": len(job_source_pairs),
+        "job_ids": [str(jid) for jid, _ in job_source_pairs],
+    }
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=ScrapeJobResponse)
+async def cancel_scrape_job(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Mark a running scrape job as cancelled. The worker pipeline checks
+    this flag between activities and stops cleanly at the next checkpoint."""
+    from datetime import datetime, timezone
+
+    job = await db.get(ScrapeJob, job_id)
+    if not job:
+        raise NotFoundError("Scrape job not found")
+    if job.status in ("completed", "failed", "cancelled"):
+        # Already in a terminal state — nothing to cancel
+        return ScrapeJobResponse.model_validate(job)
+    job.status = "cancelled"
+    job.completed_at = datetime.now(timezone.utc)
+    await db.commit()
+    return ScrapeJobResponse.model_validate(job)
+
+
+@router.post("/jobs/{job_id}/rerun", response_model=ScrapeJobResponse, status_code=201)
+async def rerun_scrape_job(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Re-run a completed/failed/cancelled job by spawning a new ScrapeJob
+    against the same source. Returns the newly-created job."""
+    from app.services.pipeline_service import run_product_pipeline
+
+    old_job = await db.get(ScrapeJob, job_id)
+    if not old_job:
+        raise NotFoundError("Scrape job not found")
+
+    new_job = await run_product_pipeline(
+        db,
+        source_id=old_job.source_id,
+        product_type=old_job.product_type or "activities",
+        triggered_by=current_user.id,
+    )
+    await db.commit()
+    return ScrapeJobResponse.model_validate(new_job)
