@@ -38,19 +38,25 @@ async def _search_unsplash(query: str, limit: int) -> list[dict]:
 
 
 async def _search_all_sources(query: str, limit: int) -> list[dict]:
-    """Search Freepik -> Pexels -> Unsplash, return first successful results."""
-    # Try Freepik first
-    results = await _search_freepik(query, limit)
-    if results:
-        return results
+    """Search Pexels -> Unsplash -> Freepik.
 
-    # Fallback to Pexels
+    Order picked for licensing:
+    - Pexels: fully free, no attribution needed (safest for royalty-free)
+    - Unsplash: fully free, no attribution needed
+    - Freepik: free tier requires attribution; used only as last resort
+    """
+    # Prefer Pexels (no-attribution license)
     results = await _search_pexels(query, limit)
     if results:
         return results
 
-    # Fallback to Unsplash
+    # Then Unsplash (no-attribution license)
     results = await _search_unsplash(query, limit)
+    if results:
+        return results
+
+    # Freepik last (its free tier is attribution-required)
+    results = await _search_freepik(query, limit)
     return results
 
 

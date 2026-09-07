@@ -205,6 +205,18 @@ class Activity(Base):
         onupdate=func.now(),
     )
 
+    # ── Dedup / soft-delete ───────────────────────────────────────────────
+    # Set when this row was merged into another activity (dedup pass).
+    merged_into_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("activities.id"),
+        nullable=True,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     # ── Relationships ─────────────────────────────────────────────────────
     destination = relationship("CatalogDestination", foreign_keys=[city_id])
     timeline: Mapped[list["ActivityTimeline"]] = relationship(

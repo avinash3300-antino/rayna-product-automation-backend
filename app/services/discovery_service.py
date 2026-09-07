@@ -172,21 +172,14 @@ async def run_discovery(
     product_type: str = "activities",
     triggered_by: uuid.UUID | None = None,
 ) -> SourceDiscoveryRun:
-    """Run source discovery for a city + category.
+    """Run source discovery for a city + category (synchronous).
 
-    Steps:
-    1. Create SourceDiscoveryRun record.
-    2. Run SearchAPI queries to find relevant websites.
-    3. Use Claude to synthesize and rank sources.
-    4. Create ScrapeSource records for each discovered source.
+    Creates a new SourceDiscoveryRun, executes it inline, returns the completed run.
     """
     # Validate city exists
     dest = await db.get(CatalogDestination, city_id)
     if not dest:
         raise NotFoundError("Destination not found")
-
-    city_name = dest.city_name or dest.name
-    country_name = dest.country_name or ""
 
     # Create discovery run
     run = SourceDiscoveryRun(
@@ -199,6 +192,85 @@ async def run_discovery(
     )
     db.add(run)
     await db.flush()
+
+    return await _execute_discovery_run(db, run, dest, triggered_by)
+
+
+async def create_pending_discovery_runs(
+    db: AsyncSession,
+    city_id: uuid.UUID,
+    categories: list[str],
+    product_type: str,
+    triggered_by: uuid.UUID | None = None,
+) -> list[SourceDiscoveryRun]:
+    """Create pending discovery rows (one per category). Caller processes in background."""
+    dest = await db.get(CatalogDestination, city_id)
+    if not dest:
+        raise NotFoundError("Destination not found")
+
+    rows: list[SourceDiscoveryRun] = []
+    for cat in categories:
+        row = SourceDiscoveryRun(
+            city_id=city_id,
+            category=cat,
+            product_type=product_type,
+            status="pending",
+            triggered_by=triggered_by,
+        )
+        db.add(row)
+        rows.append(row)
+    await db.flush()
+    await db.commit()
+    return rows
+
+
+async def process_pending_discovery_run(
+    run_id: uuid.UUID,
+    triggered_by: uuid.UUID | None = None,
+) -> None:
+    """Background worker — picks up a pending run with its own session and executes it."""
+    from app.db.base import async_session_factory
+
+    async with async_session_factory() as db:
+        run = await db.get(SourceDiscoveryRun, run_id)
+        if not run:
+            logger.warning("Pending discovery run %s not found", run_id)
+            return
+        if run.status not in ("pending", "running"):
+            logger.info("Run %s already in terminal state %s, skipping", run_id, run.status)
+            return
+
+        dest = await db.get(CatalogDestination, run.city_id)
+        if not dest:
+            run.status = "failed"
+            run.error_message = "Destination not found"
+            run.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+            return
+
+        run.status = "running"
+        run.started_at = datetime.now(timezone.utc)
+        await db.flush()
+        await db.commit()
+
+        try:
+            await _execute_discovery_run(db, run, dest, triggered_by)
+        except Exception as exc:
+            logger.error("Background discovery run %s crashed: %s", run_id, exc)
+
+
+async def _execute_discovery_run(
+    db: AsyncSession,
+    run: SourceDiscoveryRun,
+    dest: CatalogDestination,
+    triggered_by: uuid.UUID | None,
+) -> SourceDiscoveryRun:
+    """Shared execution: takes an already-persisted run row and fills it in."""
+    city_id = run.city_id
+    category = run.category
+    product_type = run.product_type or "activities"
+    city_name = dest.city_name or dest.name
+    country_name = dest.country_name or ""
 
     try:
         # ── Step 1: SearchAPI queries ────────────────────────────────
@@ -249,7 +321,7 @@ Analyze these results and identify the best websites to scrape for
             synthesis_text = await claude_client.generate(
                 prompt=synthesis_prompt,
                 system=SYNTHESIS_SYSTEM_PROMPT,
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=4096,
                 temperature=0.2,
             )
@@ -264,7 +336,7 @@ Analyze these results and identify the best websites to scrape for
 
             run.claude_synthesis = {
                 "sources": sources_data,
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-4-6",
             }
         except json.JSONDecodeError:
             logger.error("Claude returned invalid JSON for discovery synthesis")
@@ -283,14 +355,17 @@ Analyze these results and identify the best websites to scrape for
             if not source_url or not source_name:
                 continue
 
-            # Check for existing source with same URL for this city
+            # Check for existing source with same URL for this city.
+            # Use .first() instead of .scalar_one_or_none() because parallel
+            # discovery runs can race and create duplicate (city_id, source_url)
+            # rows — this check just needs "any existing?" not "exactly one".
             existing = await db.execute(
-                select(ScrapeSource).where(
+                select(ScrapeSource.id).where(
                     ScrapeSource.city_id == city_id,
                     ScrapeSource.source_url == source_url,
-                )
+                ).limit(1)
             )
-            if existing.scalar_one_or_none():
+            if existing.first():
                 continue
 
             source = ScrapeSource(
@@ -438,6 +513,26 @@ TRUSTED_DOMAINS = [
     "visitlondon.com", "londonpass.com", "attractiontickets.com",
     "ticketmaster.co.uk", "seetickets.com", "lastminute.com",
     "goldentours.com", "bigbustours.com",
+    "visitsingapore.com", "sistic.com.sg",
+    "malaysia.travel", "visitkl.com.my",
+    "naturallylangkawi.my",
+    "indonesia.travel",
+    "vietnam.travel", "vietnamtourism.gov.vn",
+    "japan.travel", "gotokyo.org",
+    "visitkorea.or.kr", "english.visitseoul.net",
+    "visitmaldives.com", "maldives.net.mv",
+    "mauritius.net", "mymauritius.travel",
+    "visitsaudi.com",
+    "experienceoman.om",
+    "france.fr", "parisinfo.com",
+    "myswitzerland.com",
+    "holland.com", "iamsterdam.com",
+    "italia.it", "turismoroma.it",
+    "spain.info", "barcelonaturisme.com",
+    "goturkiye.com", "hometurkey.com",
+    "nyctourism.com", "visittheusa.com",
+    "visitflorida.com", "washington.org",
+    "discoverlosangeles.com",
 ]
 
 

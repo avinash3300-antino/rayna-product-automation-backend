@@ -43,6 +43,32 @@ class ActivityTimelineItem(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AdditionalInformation(BaseModel):
+    """Derived audience + capability flags for an activity.
+
+    `time_of_day` and `best_suited` are bitmasks; `time_of_day_labels` and
+    `best_suited_labels` expose the same data as string arrays for UI chips.
+    """
+    time_of_day: int = 0
+    time_of_day_labels: list[str] = []
+    transfer: bool = False
+    ticket_type: bool = False
+    meal_included: bool = False
+    self_guided: bool = False
+    best_suited: int = 0
+    best_suited_labels: list[str] = []
+    kids_friendly: bool = False
+    senior_friendly: bool = False
+    wheelchair_ok: bool = False
+    pregnant_guests_ok: bool = False
+    swimming_required: bool = False
+    instant_confirmation: bool = False
+    passport_required: bool = False
+    seasonal_only: bool = False
+    solo_friendly: bool = False
+    private_options: bool = False
+
+
 class ActivityResponse(BaseModel):
     """Full activity detail response."""
 
@@ -142,6 +168,7 @@ class ActivityResponse(BaseModel):
     daily_availability: dict | None = None
     other_attributes: list | None = None
     timeline: list[ActivityTimelineItem] = []
+    additional_information: AdditionalInformation | None = None
     created_at: datetime
     updated_at: datetime
 

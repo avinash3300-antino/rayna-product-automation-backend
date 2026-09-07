@@ -42,3 +42,24 @@ class CatalogLocation(Base):
     created_at = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     destination: Mapped["CatalogDestination"] = relationship(back_populates="locations")
+
+
+class DestinationSuggestedCategory(Base):
+    __tablename__ = "destination_suggested_categories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    destination_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("catalog_destinations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    product_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("auth_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    deleted_at = mapped_column(DateTime(timezone=True), nullable=True)

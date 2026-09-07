@@ -13,6 +13,12 @@ class SourceDiscoveryRequest(BaseModel):
     product_type: str = Field(default="activities", max_length=50)
 
 
+class SourceDiscoveryBulkRequest(BaseModel):
+    city_id: UUID
+    categories: list[str] = Field(min_length=1, max_length=60)
+    product_type: str = Field(default="activities", max_length=50)
+
+
 class SourceDiscoveryRunResponse(BaseModel):
     id: UUID
     city_id: UUID

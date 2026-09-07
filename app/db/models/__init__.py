@@ -8,7 +8,11 @@ class Base(DeclarativeBase):
 # Import all models so Alembic can detect them
 from app.db.models.auth import AuthUser, AuthRole, AuthUserRole  # noqa: E402, F401
 from app.db.models.sessions import AuthUserSession  # noqa: E402, F401
-from app.db.models.destinations import CatalogDestination, CatalogLocation  # noqa: E402, F401
+from app.db.models.destinations import (  # noqa: E402, F401
+    CatalogDestination,
+    CatalogLocation,
+    DestinationSuggestedCategory,
+)
 from app.db.models.audit import AuditAuditLog  # noqa: E402, F401
 from app.db.models.activities import Activity, ActivityTimeline  # noqa: E402, F401
 from app.db.models.cruises import (  # noqa: E402, F401

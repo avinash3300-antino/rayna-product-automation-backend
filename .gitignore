@@ -52,3 +52,6 @@ htmlcov/
 # Distribution
 *.tar.gz
 *.whl
+
+# Cover all .env variants (backups, local, docker, etc.)
+.env*

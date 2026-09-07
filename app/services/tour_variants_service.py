@@ -120,7 +120,7 @@ async def _extract_from_markdown(markdown: str) -> dict | None:
         response_text = await claude_client.generate(
             prompt=f"Extract tour variants/options from this booking page:{source_hint}\n\n{markdown}",
             system=TOUR_VARIANTS_EXTRACTION_PROMPT,
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=2048,
             temperature=0.1,
         )

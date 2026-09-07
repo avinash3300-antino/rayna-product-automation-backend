@@ -14,6 +14,7 @@ from app.db.models.activities import Activity
 from app.db.models.cruises import CruiseProduct
 from app.db.models.reviews import ProductReview
 from app.integrations.claude_client import claude_client
+from app.integrations.gemini_client import gemini_client
 from app.integrations.jina_client import jina_client
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,12 @@ RULES:
 - Only include reviews with meaningful text (20+ chars)
 - Do NOT fabricate reviews or names. Only extract what's on the page.
 - Return ONLY valid JSON array, no markdown fences.
-- If no reviews found, return empty array: []"""
+- If no reviews found, return empty array: []
+
+CONTENT SAFETY (these reviews are published on raynatours.com):
+- SKIP any review whose text mentions a third-party booking platform or OTA brand by name. Forbidden brands include (case-insensitive): Viator, GetYourGuide, GYG, TripAdvisor, Trustpilot, Booking.com, Booking, Klook, Tiqets, Civitatis, Expedia, Tours4Fun, Headout, Musement, Airbnb Experiences, Tiqet.
+- SKIP reviews that read like a review of the booking platform itself ("the website was easy", "customer service responded quickly") rather than the tour/experience.
+- Do not extract reviewer_name values that are clearly the platform name."""
 
 
 def _get_model(product_type: str):
@@ -235,47 +241,69 @@ async def _scrape_google_reviews(
     country: str,
     max_reviews: int = 10,
 ) -> list[dict]:
-    """Scrape Google Maps reviews using SearchAPI."""
+    """Scrape Google Maps reviews using SearchAPI, paginated up to max_reviews.
+
+    SearchAPI's google_maps_reviews endpoint returns up to ~8 reviews per call.
+    We paginate via next_page_token until we reach max_reviews or run out.
+    """
     query = f"{product_name} {city} {country}"
     data_id = await _find_google_place(query)
     if not data_id:
         logger.info("No Google Maps place found for '%s'", product_name)
         return []
 
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(
-                SEARCHAPI_BASE,
-                params={
-                    "engine": "google_maps_reviews",
-                    "data_id": data_id,
-                    "api_key": settings.SEARCHAPI_KEY,
-                    "num": max_reviews,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-    except Exception as exc:
-        logger.warning("SearchAPI google_maps_reviews failed: %s", exc)
-        return []
+    collected: list[dict] = []
+    next_token: str | None = None
+    max_pages = 6  # 6 pages * ~8 = ~48 max
+    seen_texts: set[str] = set()
 
-    reviews = []
-    for r in data.get("reviews", [])[:max_reviews]:
-        text = r.get("snippet", "") or r.get("text", "")
-        if not text or len(text) < 20:
-            continue
-        reviews.append({
-            "reviewer_name": r.get("user", {}).get("name", "Google User"),
-            "reviewer_avatar_url": r.get("user", {}).get("thumbnail"),
-            "rating": r.get("rating"),
-            "review_title": None,
-            "review_text": text,
-            "review_date": r.get("date"),
-            "verified": r.get("is_local_guide", False),
-            "language": "en",
-            "source_url": r.get("link"),
-        })
-    return reviews
+    for page in range(max_pages):
+        params: dict = {
+            "engine": "google_maps_reviews",
+            "data_id": data_id,
+            "api_key": settings.SEARCHAPI_KEY,
+        }
+        if next_token:
+            params["next_page_token"] = next_token
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(SEARCHAPI_BASE, params=params)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as exc:
+            if page == 0:
+                logger.warning("SearchAPI google_maps_reviews failed: %s", exc)
+            break
+
+        raw = data.get("reviews", []) or []
+        for r in raw:
+            text = r.get("snippet", "") or r.get("text", "")
+            if not text or len(text) < 20:
+                continue
+            key = text[:120]
+            if key in seen_texts:
+                continue
+            seen_texts.add(key)
+            collected.append({
+                "reviewer_name": (r.get("user") or {}).get("name", "Google User"),
+                "reviewer_avatar_url": (r.get("user") or {}).get("thumbnail"),
+                "rating": r.get("rating"),
+                "review_title": None,
+                "review_text": text,
+                "review_date": r.get("date"),
+                "verified": bool(r.get("is_local_guide", False)),
+                "language": "en",
+                "source_url": r.get("link"),
+            })
+            if len(collected) >= max_reviews:
+                return collected
+
+        next_token = (data.get("pagination") or {}).get("next_page_token") or data.get("next_page_token")
+        if not next_token:
+            break
+
+    return collected
 
 
 async def _find_google_place(query: str) -> str | None:
@@ -309,6 +337,7 @@ async def _scrape_tripadvisor_reviews(
     product_name: str,
     city: str,
     max_reviews: int = 10,
+    provider: str = "claude",
 ) -> list[dict]:
     """Find TripAdvisor page and extract reviews."""
     query = f"site:tripadvisor.com {product_name} {city}"
@@ -316,7 +345,7 @@ async def _scrape_tripadvisor_reviews(
     if not url:
         logger.info("No TripAdvisor page found for '%s'", product_name)
         return []
-    return await _extract_reviews_from_url(url, "tripadvisor", max_reviews)
+    return await _extract_reviews_from_url(url, "tripadvisor", max_reviews, provider=provider)
 
 
 # ── Trustpilot Reviews (via Jina + Claude) ───────────────────────────────
@@ -326,6 +355,7 @@ async def _scrape_trustpilot_reviews(
     operator_or_name: str,
     city: str,
     max_reviews: int = 10,
+    provider: str = "claude",
 ) -> list[dict]:
     """Find Trustpilot page and extract reviews."""
     query = f"site:trustpilot.com {operator_or_name} {city}"
@@ -333,7 +363,7 @@ async def _scrape_trustpilot_reviews(
     if not url:
         logger.info("No Trustpilot page found for '%s'", operator_or_name)
         return []
-    return await _extract_reviews_from_url(url, "trustpilot", max_reviews)
+    return await _extract_reviews_from_url(url, "trustpilot", max_reviews, provider=provider)
 
 
 # ── Shared Helpers ───────────────────────────────────────────────────────
@@ -366,9 +396,12 @@ async def _find_review_page(query: str, domain: str) -> str | None:
 
 
 async def _extract_reviews_from_url(
-    url: str, platform: str, max_reviews: int = 10
+    url: str, platform: str, max_reviews: int = 10, provider: str = "claude"
 ) -> list[dict]:
-    """Read a review page with Jina and extract reviews with Claude."""
+    """Read a review page with Jina and extract reviews with an LLM.
+
+    provider="claude" (default, uses Haiku 4.5) or "gemini" (uses gemini-flash-latest).
+    """
     try:
         page_content = await jina_client.clean_page(url)
         page_content = jina_client.clean_markdown(page_content)
@@ -379,7 +412,8 @@ async def _extract_reviews_from_url(
     if not page_content or len(page_content) < 100:
         return []
 
-    page_content = page_content[:15000]
+    # More context for a bigger review haul
+    page_content = page_content[:25000]
 
     prompt = f"""Extract reviews from this {platform} page.
 
@@ -391,13 +425,22 @@ Page Content:
 Extract up to {max_reviews} real reviews with rating, reviewer name, review text, and date."""
 
     try:
-        response_text = await claude_client.generate(
-            prompt=prompt,
-            system=REVIEW_EXTRACTION_PROMPT.format(max_reviews=max_reviews),
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            temperature=0.1,
-        )
+        if provider == "gemini":
+            response_text = await gemini_client.generate(
+                prompt=prompt,
+                system=REVIEW_EXTRACTION_PROMPT.format(max_reviews=max_reviews),
+                model="gemini-flash-latest",
+                max_tokens=16000,
+                temperature=0.1,
+            )
+        else:
+            response_text = await claude_client.generate(
+                prompt=prompt,
+                system=REVIEW_EXTRACTION_PROMPT.format(max_reviews=max_reviews),
+                model="claude-haiku-4-5-20251001",
+                max_tokens=4096,
+                temperature=0.1,
+            )
 
         text = response_text.strip()
         if text.startswith("```"):
@@ -416,36 +459,83 @@ Extract up to {max_reviews} real reviews with rating, reviewer name, review text
         return reviews[:max_reviews]
 
     except json.JSONDecodeError as exc:
-        logger.warning("Claude returned invalid JSON for %s reviews: %s", platform, exc)
+        # Try to salvage by truncating to last complete '}' before the error
+        try:
+            cutoff = text.rfind("},")
+            if cutoff > 100:
+                salvaged = text[: cutoff + 1] + "]"
+                reviews = json.loads(salvaged)
+                if isinstance(reviews, list):
+                    for r in reviews:
+                        r["source_url"] = url
+                    logger.info("%s extraction salvaged %d reviews after JSON truncation", platform, len(reviews))
+                    return reviews[:max_reviews]
+        except Exception:
+            pass
+        logger.warning("LLM returned invalid JSON for %s reviews: %s", platform, exc)
         return []
     except Exception as exc:
-        logger.warning("Claude review extraction failed for %s: %s", platform, exc)
+        logger.warning("LLM review extraction failed for %s: %s", platform, exc)
         return []
 
 
 # ── Review Enrichment (Claude rewrite) ───────────────────────────────────
 
-ENRICH_SYSTEM_PROMPT = """You are a professional review editor for a premium travel company. \
+ENRICH_SYSTEM_PROMPT = """You are a professional review editor for Rayna Tours (raynatours.com), a premium travel company. \
 Rewrite the following user review to be more polished, grammatically correct, and professional \
 while preserving the original sentiment, key facts, and rating context. \
 Keep approximately the same length. Do NOT change the reviewer's opinion or add information \
-not in the original. Return ONLY the rewritten review text, nothing else."""
+not in the original.
+
+CONTENT SAFETY (mandatory):
+- REMOVE every mention of third-party booking platforms or OTA brands. Forbidden brands (case-insensitive): \
+Viator, GetYourGuide, GYG, TripAdvisor, Trustpilot, Booking.com, Booking, Klook, Tiqets, Civitatis, \
+Expedia, Tours4Fun, Headout, Musement, Airbnb Experiences.
+- Replace brand references with generic phrasing: "I booked through Viator" → "I booked the tour"; \
+"the GetYourGuide app" → "the booking confirmation"; "TripAdvisor said" → "reviews said".
+- Do not introduce the name "Rayna Tours" either — keep the review platform-neutral.
+- If after removing brand references the review becomes empty or meaningless, return the exact string \
+"__SKIP__" so the caller knows to drop it.
+
+Return ONLY the rewritten review text (or "__SKIP__"), nothing else."""
 
 
-async def enrich_single_review(original_text: str) -> str | None:
-    """Rewrite a single review using Claude."""
-    try:
-        result = await claude_client.generate(
-            prompt=f"Original review:\n\n{original_text}\n\nRewrite this review professionally:",
+async def enrich_single_review(original_text: str, provider: str = "gemini") -> str | None:
+    """Rewrite a single review.
+
+    Returns:
+      * str  — successful rewrite
+      * None — model returned __SKIP__ (intentional drop)
+
+    Raises on API failures (rate limit, credit depleted, network error) so
+    callers can distinguish real skips from transient errors.
+    provider="gemini" (default, cheap) or "claude" (Haiku 4.5).
+    """
+    prompt = f"Original review:\n\n{original_text}\n\nRewrite this review professionally:"
+    if provider == "gemini":
+        result = await gemini_client.generate(
+            prompt=prompt,
             system=ENRICH_SYSTEM_PROMPT,
-            model="claude-sonnet-4-20250514",
+            model="gemini-flash-latest",
+            max_tokens=1024,
+            temperature=0.3,
+            json_mode=False,  # plain-text enrichment, not JSON
+        )
+    else:
+        result = await claude_client.generate(
+            prompt=prompt,
+            system=ENRICH_SYSTEM_PROMPT,
+            model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             temperature=0.3,
         )
-        return result.strip()
-    except Exception as exc:
-        logger.error("Review enrichment failed: %s", exc)
+    cleaned = (result or "").strip()
+    if cleaned == "__SKIP__" or "__SKIP__" in cleaned[:20]:
         return None
+    if not cleaned:
+        # Empty output — treat as transient, not a skip
+        raise RuntimeError("enrich returned empty text")
+    return cleaned
 
 
 async def enrich_reviews_for_product(

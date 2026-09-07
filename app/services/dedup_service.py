@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 import uuid
 
 from sqlalchemy import select
@@ -14,6 +15,42 @@ from app.db.models.reviews import ProductEmbedding
 from app.integrations.claude_client import claude_client
 
 logger = logging.getLogger(__name__)
+
+# Filler tokens to strip when normalizing product names for dedup hashing.
+# Same rules used by the retroactive dedup pass (dedup_activities_merge.py).
+# Keeps dedup category-agnostic so the same product under different categories
+# collapses to one row.
+_FILLER_TOKENS = [
+    "tickets", "ticket", "tours", "tour", "experiences", "experience",
+    "entry", "entrance", "passes", "pass",
+    "skip-the-line", "skip the line", "skip-the-lines",
+    "guided", "self-guided", "combo", "combos", "combo ticket",
+    "day trip", "day trips", "day tour", "day tours",
+    "half day", "half-day", "full day", "full-day",
+    "and", "with", "the",
+]
+_PUNCT_RE = re.compile(r"[^\w\s]")
+_WS_RE = re.compile(r"\s+")
+
+
+def normalize_name(name: str, city_name: str | None = None) -> str:
+    """Normalize an activity name for dedup matching.
+
+    Rules: lowercase, strip punctuation, strip city name if present,
+    strip common filler tokens (ticket/tour/experience/etc), collapse whitespace.
+    """
+    if not name:
+        return ""
+    s = name.lower()
+    s = _PUNCT_RE.sub(" ", s)
+    if city_name:
+        c = city_name.lower()
+        s = re.sub(rf"\b{re.escape(c)}\b", " ", s)
+    for tok in _FILLER_TOKENS:
+        s = re.sub(rf"\b{re.escape(tok)}\b", " ", s)
+    s = s.replace("&", " ").replace("/", " ").replace("-", " ")
+    s = _WS_RE.sub(" ", s).strip()
+    return s
 
 # Maps product_type string → SQLAlchemy model class
 MODEL_REGISTRY: dict[str, type] = {
@@ -52,11 +89,13 @@ def _get_model(product_type: str):
 
 
 def compute_dedupe_hash(name: str, city: str, category: str) -> str:
-    """MD5 hash of normalized name+city+category for exact-match dedup."""
-    normalized = (
-        f"{name.lower().strip()}_{city.lower().strip()}"
-        f"_{category.lower().strip()}"
-    )
+    """MD5 hash of normalized(name)+city for exact-match dedup.
+
+    Category is intentionally EXCLUDED so the same product under different
+    scrape categories (e.g. 'Day Trips' vs 'Cultural & Heritage') collapses
+    into one row. `category` param is kept for backward compatibility.
+    """
+    normalized = f"{normalize_name(name, city)}_{(city or '').lower().strip()}"
     return hashlib.md5(normalized.encode()).hexdigest()
 
 
@@ -65,12 +104,17 @@ async def find_exact_duplicate(
     dedup_hash: str,
     product_type: str = "activities",
 ):
-    """Find an existing product with the same dedup hash."""
+    """Find an existing (non-deleted, non-merged) product with the same dedup hash."""
     model = _get_model(product_type)
-    result = await db.execute(
-        select(model).where(model.dedup_hash == dedup_hash)
-    )
-    return result.scalar_one_or_none()
+    query = select(model).where(model.dedup_hash == dedup_hash)
+    # For activities, exclude soft-deleted / merged rows
+    if product_type == "activities":
+        query = query.where(
+            Activity.deleted_at.is_(None),
+            Activity.merged_into_id.is_(None),
+        )
+    result = await db.execute(query)
+    return result.scalars().first()  # tolerate any legacy dup hashes
 
 
 async def find_semantic_duplicate(
@@ -97,7 +141,15 @@ async def find_semantic_duplicate(
         .where(ProductEmbedding.product_type == product_type)
     )
 
-    if city_id:
+    # For activities, always join to filter out soft-deleted / merged rows
+    if product_type == "activities":
+        query = query.join(model, model.id == ProductEmbedding.product_id).where(
+            model.deleted_at.is_(None),
+            model.merged_into_id.is_(None),
+        )
+        if city_id:
+            query = query.where(model.city_id == city_id)
+    elif city_id:
         query = query.join(model, model.id == ProductEmbedding.product_id).where(
             model.city_id == city_id
         )
@@ -230,7 +282,7 @@ Do NOT copy phrasing from either source."""
         response = await claude_client.generate(
             prompt=prompt,
             system=MERGE_SYSTEM_PROMPT,
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=4096,
             temperature=0.4,
         )

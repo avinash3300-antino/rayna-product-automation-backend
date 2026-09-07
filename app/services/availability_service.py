@@ -89,7 +89,7 @@ async def _extract_from_markdown(markdown: str) -> dict | None:
         response_text = await claude_client.generate(
             prompt=f"Extract availability/scheduling information from this booking page:\n\n{markdown}",
             system=AVAILABILITY_EXTRACTION_PROMPT,
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1024,
             temperature=0.1,
         )

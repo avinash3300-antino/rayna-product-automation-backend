@@ -50,7 +50,7 @@ async def _extract_with_claude(page_text: str, date_str: str) -> dict | None:
         response = await claude_client.generate(
             prompt=f"Extract availability data for date {date_str} from this booking page content:\n\n{page_text[:12000]}",
             system=DAYWISE_EXTRACTION_PROMPT,
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=2048,
             temperature=0.1,
         )

@@ -22,8 +22,10 @@ from app.schemas.destinations import (
     PaginatedResponse,
     ProductCountSummary,
     ScrapeJobBrief,
+    SuggestedCategoryCreate,
+    SuggestedCategoryResponse,
 )
-from app.services import destination_service
+from app.services import destination_categories_service, destination_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/destinations", tags=["destinations"])
@@ -285,3 +287,79 @@ async def delete_location(
     await destination_service.delete_location(
         db, destination_id, location_id, current_user.id,
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Suggested categories (AI + user)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.get(
+    "/{destination_id}/categories",
+    response_model=list[SuggestedCategoryResponse],
+)
+async def list_destination_categories(
+    destination_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    product_type: str = Query("activities"),
+):
+    """List active suggested categories for a destination + product type.
+    Auto-generates via Claude if none cached yet."""
+    rows = await destination_categories_service.list_or_generate(
+        db, destination_id, product_type
+    )
+    return [SuggestedCategoryResponse.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/{destination_id}/categories/regenerate",
+    response_model=list[SuggestedCategoryResponse],
+)
+async def regenerate_destination_categories(
+    destination_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+    product_type: str = Query("activities"),
+):
+    """Soft-delete AI categories and regenerate from Claude. User categories kept."""
+    rows = await destination_categories_service.regenerate_ai(
+        db, destination_id, product_type
+    )
+    return [SuggestedCategoryResponse.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/{destination_id}/categories",
+    response_model=SuggestedCategoryResponse,
+    status_code=201,
+)
+async def add_destination_category(
+    destination_id: UUID,
+    body: SuggestedCategoryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Add a user-defined category to a destination."""
+    row = await destination_categories_service.add_user_category(
+        db,
+        destination_id=destination_id,
+        name=body.name,
+        product_type=body.product_type,
+        actor_id=current_user.id,
+    )
+    return SuggestedCategoryResponse.model_validate(row)
+
+
+@router.delete(
+    "/{destination_id}/categories/{category_id}",
+    status_code=204,
+)
+async def delete_destination_category(
+    destination_id: UUID,
+    category_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Soft-delete a suggested category."""
+    await destination_categories_service.delete_category(db, category_id)

@@ -43,7 +43,7 @@ async def convert_description(description: str, activity_name: str) -> str | Non
         result = await claude_client.generate(
             prompt=f"Activity: {activity_name}\n\nConvert this description to bullet points:\n\n{description}",
             system=SYSTEM_PROMPT,
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=2048,
             temperature=0.3,
         )

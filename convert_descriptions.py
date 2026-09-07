@@ -31,7 +31,7 @@ Input description:
 def convert_description(client, text):
     """Use Claude to convert a plain text description to HTML bullets."""
     resp = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=2000,
         messages=[{"role": "user", "content": CONVERT_PROMPT.format(description=text)}],
     )

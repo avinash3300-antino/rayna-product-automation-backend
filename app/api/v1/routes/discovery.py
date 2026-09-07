@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from app.schemas.scraping import (
     AddSourceRequest,
     ScrapeSourceResponse,
     SourceApprovalRequest,
+    SourceDiscoveryBulkRequest,
     SourceDiscoveryRequest,
     SourceDiscoveryRunResponse,
 )
@@ -39,6 +41,41 @@ async def trigger_discovery(
         triggered_by=current_user.id,
     )
     return SourceDiscoveryRunResponse.model_validate(run)
+
+
+@router.post(
+    "/run-bulk",
+    response_model=list[SourceDiscoveryRunResponse],
+    status_code=201,
+)
+async def trigger_discovery_bulk(
+    body: SourceDiscoveryBulkRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUser = Depends(require_role(*MANAGER_ROLES)),
+):
+    """Trigger discovery for one city + multiple categories.
+
+    Creates one pending SourceDiscoveryRun per category, then kicks off
+    background tasks. Returns the pending runs immediately so the frontend
+    can poll each by id.
+    """
+    runs = await discovery_service.create_pending_discovery_runs(
+        db,
+        city_id=body.city_id,
+        categories=body.categories,
+        product_type=body.product_type,
+        triggered_by=current_user.id,
+    )
+    run_ids = [r.id for r in runs]
+
+    for rid in run_ids:
+        asyncio.create_task(
+            discovery_service.process_pending_discovery_run(
+                rid, triggered_by=current_user.id
+            )
+        )
+
+    return [SourceDiscoveryRunResponse.model_validate(r) for r in runs]
 
 
 @router.get("/runs/{run_id}", response_model=SourceDiscoveryRunResponse)

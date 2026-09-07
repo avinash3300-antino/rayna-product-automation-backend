@@ -185,3 +185,22 @@ class DestinationStatsOverview(BaseModel):
     total_products: ProductCountSummary = ProductCountSummary()
     products_published: int = 0
     products_in_pipeline: int = 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Suggested categories (AI + user-added per destination)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SuggestedCategoryResponse(BaseModel):
+    id: UUID
+    name: str
+    source: str
+    product_type: str
+
+    model_config = {"from_attributes": True}
+
+
+class SuggestedCategoryCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    product_type: str = Field(min_length=1, max_length=50)

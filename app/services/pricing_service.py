@@ -91,7 +91,7 @@ async def _extract_pricing_from_url(url: str) -> dict | None:
         response_text = await claude_client.generate(
             prompt=f"Extract pricing from this booking page:\n\n{markdown}",
             system=PRICING_EXTRACTION_PROMPT,
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1024,
             temperature=0.1,
         )

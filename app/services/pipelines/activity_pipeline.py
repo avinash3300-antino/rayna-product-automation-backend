@@ -364,7 +364,7 @@ Scraped exclusions:
         response_text = await claude_client.generate(
             prompt=prompt,
             system=ENRICHMENT_SYSTEM_PROMPT,
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=4096,
             temperature=0.4,
         )

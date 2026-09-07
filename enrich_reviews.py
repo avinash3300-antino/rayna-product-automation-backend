@@ -29,7 +29,7 @@ Return ONLY the JSON object, no markdown fences, no explanation."""
 
 def enrich_review(client, name, text):
     resp = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1024,
         temperature=0.4,
         system=ENRICH_SYSTEM_PROMPT,

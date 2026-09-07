@@ -109,7 +109,7 @@ Extract all products/experiences from this page."""
         response_text = await claude_client.generate(
             prompt=prompt,
             system=extraction_prompt,
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=16384,
             temperature=0.2,
         )

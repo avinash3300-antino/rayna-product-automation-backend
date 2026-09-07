@@ -25,6 +25,12 @@ from app.schemas.activities import (
     ActivityResponse,
     ActivityStatusUpdate,
     ActivityUpdate,
+    AdditionalInformation,
+)
+from app.utils.additional_info import (
+    derive_additional_information,
+    expand_best_suited,
+    expand_time_of_day,
 )
 from app.schemas.destinations import PaginatedResponse
 
@@ -43,6 +49,34 @@ async def _get_activity_with_timeline(db: AsyncSession, activity_id: UUID) -> Ac
         .where(Activity.id == activity_id)
     )
     return result.scalars().first()
+
+
+def _build_activity_response(activity: Activity) -> ActivityResponse:
+    """Serialize an Activity ORM row and attach derived additional_information."""
+    info = derive_additional_information(activity)
+    addinfo = AdditionalInformation(
+        time_of_day=info["TimeOfDay"],
+        time_of_day_labels=expand_time_of_day(info["TimeOfDay"]),
+        transfer=info["Transfer"],
+        ticket_type=info["TicketType"],
+        meal_included=info["MealIncluded"],
+        self_guided=info["SelfGuided"],
+        best_suited=info["BestSuited"],
+        best_suited_labels=expand_best_suited(info["BestSuited"]),
+        kids_friendly=info["KidsFriendly"],
+        senior_friendly=info["SeniorFriendly"],
+        wheelchair_ok=info["WheelchairOK"],
+        pregnant_guests_ok=info["PregnantGuestsOK"],
+        swimming_required=info["SwimmingRequired"],
+        instant_confirmation=info["InstantConfirmation"],
+        passport_required=info["PassportRequired"],
+        seasonal_only=info["SeasonalOnly"],
+        solo_friendly=info["SoloFriendly"],
+        private_options=info["PrivateOptions"],
+    )
+    response = ActivityResponse.model_validate(activity)
+    response.additional_information = addinfo
+    return response
 
 
 def _json_safe(data: dict | None) -> dict | None:
@@ -89,9 +123,16 @@ async def list_activity_cities(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return distinct city names from activities, sorted alphabetically."""
+    """Return distinct city names from active activities, sorted alphabetically."""
     result = await db.execute(
-        select(Activity.city).where(Activity.city.isnot(None)).distinct().order_by(Activity.city)
+        select(Activity.city)
+        .where(
+            Activity.city.isnot(None),
+            Activity.deleted_at.is_(None),
+            Activity.merged_into_id.is_(None),
+        )
+        .distinct()
+        .order_by(Activity.city)
     )
     return [row[0] for row in result.all()]
 
@@ -101,10 +142,14 @@ async def list_activity_categories(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return distinct category names from activities, sorted alphabetically."""
+    """Return distinct category names from active activities, sorted alphabetically."""
     result = await db.execute(
         select(Activity.category)
-        .where(Activity.category.isnot(None))
+        .where(
+            Activity.category.isnot(None),
+            Activity.deleted_at.is_(None),
+            Activity.merged_into_id.is_(None),
+        )
         .distinct()
         .order_by(Activity.category)
     )
@@ -310,8 +355,15 @@ async def list_activities(
     per_page: int = Query(25, ge=1, le=100),
 ):
     """List activities with filters and pagination."""
-    query = select(Activity)
-    count_query = select(func.count(Activity.id))
+    # Hide soft-deleted / merged rows from the UI list.
+    query = select(Activity).where(
+        Activity.deleted_at.is_(None),
+        Activity.merged_into_id.is_(None),
+    )
+    count_query = select(func.count(Activity.id)).where(
+        Activity.deleted_at.is_(None),
+        Activity.merged_into_id.is_(None),
+    )
 
     if category:
         query = query.where(Activity.category == category)
@@ -362,7 +414,26 @@ async def list_activities(
     total = total_result.scalar_one()
     total_pages = (total + per_page - 1) // per_page if per_page > 0 else 0
 
-    query = query.order_by(Activity.created_at.desc())
+    # Sort tiers:
+    #   0 = has options AND gallery
+    #   1 = has options only
+    #   2 = no options
+    # Within each tier, newest first.
+    from sqlalchemy import case, cast, String
+    has_variants = (
+        (Activity.tour_variants.isnot(None))
+        & (cast(Activity.tour_variants, String).notin_(("null", "[]")))
+    )
+    has_gallery = (
+        (Activity.gallery_json.isnot(None))
+        & (cast(Activity.gallery_json, String).notin_(("null", "[]")))
+    )
+    sort_tier = case(
+        (has_variants & has_gallery, 0),
+        (has_variants, 1),
+        else_=2,
+    )
+    query = query.order_by(sort_tier, Activity.created_at.desc())
     query = query.offset((page - 1) * per_page).limit(per_page)
 
     result = await db.execute(query)
@@ -395,7 +466,7 @@ async def get_activity_by_slug(
     activity = result.scalars().first()
     if not activity:
         raise NotFoundError("Activity not found")
-    return ActivityResponse.model_validate(activity)
+    return _build_activity_response(activity)
 
 
 # ── Get by ID ────────────────────────────────────────────────────────────
@@ -411,7 +482,7 @@ async def get_activity(
     activity = await _get_activity_with_timeline(db, activity_id)
     if not activity:
         raise NotFoundError("Activity not found")
-    return ActivityResponse.model_validate(activity)
+    return _build_activity_response(activity)
 
 
 # ── Update Activity ──────────────────────────────────────────────────────
@@ -443,7 +514,7 @@ async def update_activity(
 
     # Re-fetch with timeline
     activity = await _get_activity_with_timeline(db, activity_id)
-    return ActivityResponse.model_validate(activity)
+    return _build_activity_response(activity)
 
 
 # ── Status Change ────────────────────────────────────────────────────────
@@ -476,7 +547,7 @@ async def update_activity_status(
     await db.commit()
 
     activity = await _get_activity_with_timeline(db, activity_id)
-    return ActivityResponse.model_validate(activity)
+    return _build_activity_response(activity)
 
 
 # ── Delete Activity ──────────────────────────────────────────────────────
@@ -522,7 +593,7 @@ async def re_enrich_activity(
     await db.commit()
 
     activity = await _get_activity_with_timeline(db, activity_id)
-    return ActivityResponse.model_validate(activity)
+    return _build_activity_response(activity)
 
 
 @router.post("/{activity_id}/scrape-pricing")

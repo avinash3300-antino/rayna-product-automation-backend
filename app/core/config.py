@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # Anthropic
     ANTHROPIC_API_KEY: str = ""
 
+    # Gemini (Google Generative Language API)
+    GEMINI_API_KEY: str = ""
+
     # Ahrefs
     AHREFS_API_TOKEN: str = ""
 
